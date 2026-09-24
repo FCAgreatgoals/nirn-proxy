@@ -1,8 +1,10 @@
 package lib
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,5 +85,45 @@ func TestGlobalLimitSparesInteractions(t *testing.T) {
 	}
 	if took := serve("GET", "/api/v10/channels/203039963636301824"); took < 500*time.Millisecond {
 		t.Errorf("ordinary request took %v: the interactions spent the global budget, or it was not enforced", took)
+	}
+}
+
+// interactionToken builds a token the way Discord shapes them: the base64 of
+// "interaction:<id>:<secret>", unpadded.
+func interactionToken(id string) string {
+	raw := "interaction:" + id + ":" + strings.Repeat("s", 80)
+	return strings.TrimRight(base64.StdEncoding.EncodeToString([]byte(raw)), "=")
+}
+
+// The followup route and the original response of one interaction share a
+// counter, so they share a queue; another interaction is not held back.
+func TestInteractionWebhookRoutesShareOneQueue(t *testing.T) {
+	const resetAfter = time.Second
+	fake := &fakeDiscord{answer: func(req *http.Request, _ []byte) (int, http.Header, string) {
+		h := http.Header{}
+		h.Set("X-RateLimit-Limit", "5")
+		h.Set("X-RateLimit-Reset-After", "1.000")
+		if req.Method == "POST" {
+			h.Set("X-RateLimit-Remaining", "0") // the followup spends the last request
+		} else {
+			h.Set("X-RateLimit-Remaining", "3")
+		}
+		return 200, h, "{}"
+	}}
+	q := newTestQueue(fake)
+
+	first := "/api/v10/webhooks/203039963636301824/" + interactionToken("203039963636301830")
+	other := "/api/v10/webhooks/203039963636301824/" + interactionToken("203039963636301831")
+
+	q.send(t, "POST", first, `{"content":"followup"}`)
+	start := time.Now()
+	q.send(t, "PATCH", other+"/messages/@original", `{"content":"other"}`)
+	if waited := time.Since(start); waited > resetAfter/2 {
+		t.Errorf("another interaction waited %v", waited)
+	}
+
+	q.send(t, "PATCH", first+"/messages/@original", `{"content":"edit"}`)
+	if gap := fake.call(2).at.Sub(fake.call(0).at); gap < resetAfter-100*time.Millisecond {
+		t.Errorf("the original response was edited %v after the followup spent the shared counter", gap)
 	}
 }
