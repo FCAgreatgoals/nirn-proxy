@@ -74,7 +74,9 @@ func main() {
 
 	globalOverrides := lib.EnvGet("BOT_RATELIMIT_OVERRIDES", "")
 
-	disableGlobalRatelimitDetection := lib.EnvGetBool("DISABLE_GLOBAL_RATELIMIT_DETECTION", false)
+	// Off unless asked for: Discord documents 50 requests per second unless
+	// support raises it, which BOT_RATELIMIT_OVERRIDES expresses exactly.
+	disableGlobalRatelimitDetection := lib.EnvGetBool("DISABLE_GLOBAL_RATELIMIT_DETECTION", true)
 
 	if err := lib.SetDiscordURL(lib.EnvGet("DISCORD_URL", "https://discord.com")); err != nil {
 		logger.WithFields(logrus.Fields{"function": "SetDiscordURL"}).Fatal(err)
