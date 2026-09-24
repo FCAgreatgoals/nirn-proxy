@@ -46,6 +46,11 @@ Comma separated list of stable/known members of the cluster. Does not need to in
 
 Example: `10.0.0.2,10.0.0.3:7244`
 
+##### CLUSTER_ADVERTISE_ADDR
+The address this node advertises to the other cluster nodes. Leave empty to let memberlist pick it. Inside a container that pick can be unreachable from the other nodes: set an IP address or a host name, or `auto` to take the first non-loopback IPv4 of the host.
+
+Default: empty
+
 ##### CLUSTER_DNS
 DNS address that will resolve to multiple members of the cluster. Does not need to include all members, a gossip protocol is used for discovery. While this is the recommended method of discovery for Kubernetes or similar, it does come with a limitation, which is that all nodes must use the same port for communication since DNS can't return port information. The port used by the proxy for requests is broadcasted automatically and doesn't need to be the same for nodes.
 
