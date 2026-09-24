@@ -2,6 +2,7 @@ package lib
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,5 +56,34 @@ func TestExhaustedGuildDoesNotHoldBackAnother(t *testing.T) {
 	q.send(t, "GET", "/api/v10/guilds/203039963636301825/channels", "")
 	if waited := time.Since(start); waited > resetAfter/2 {
 		t.Errorf("second guild waited %v for the first guild's bucket", waited)
+	}
+}
+
+// snowflakeAged returns a snowflake created the given duration ago.
+func snowflakeAged(age time.Duration) string {
+	ms := uint64(time.Now().Add(-age).UnixMilli() - 1420070400000)
+	return strconv.FormatUint(ms<<22, 10)
+}
+
+// Deleting an old message has its own bucket. Upstream's rule for it never
+// fired, because it read the wrong path segment.
+func TestMessageDeleteAgeRule(t *testing.T) {
+	const channel = "/api/v10/channels/203039963636301824/messages/"
+	cases := []struct {
+		age  time.Duration
+		want string
+	}{
+		{30 * 24 * time.Hour, "/channels/203039963636301824/messages/!14dmsg"},
+		{time.Hour, "/channels/203039963636301824/messages/!"},
+		{time.Second, "/channels/203039963636301824/messages/!10smsg"},
+	}
+	for _, c := range cases {
+		if got := GetOptimisticBucketPath(channel+snowflakeAged(c.age), "DELETE"); got != c.want {
+			t.Errorf("DELETE of a message %v old -> %q, want %q", c.age, got, c.want)
+		}
+	}
+	// Only deletes are concerned, and only the message itself.
+	if got := GetOptimisticBucketPath(channel+snowflakeAged(30*24*time.Hour), "GET"); got != "/channels/203039963636301824/messages/!" {
+		t.Errorf("GET of an old message -> %q", got)
 	}
 }

@@ -129,15 +129,24 @@ func GetOptimisticBucketPath(url string, method string) string {
 
 	// At this point, the major + id part is already accounted for
 	// In this loop, we only need to strip all remaining snowflakes, emoji names and webhook tokens(optional)
-	for idx, part := range parts[2:] {
+	tail := parts[2:]
+	for idx, part := range tail {
 		if IsSnowflake(part) {
-			// Custom rule for messages older than 14d
-			if currMajor == MajorChannels && parts[idx - 1] == "messages" && method == "DELETE" {
+			// Deleting a message older than 14 days, or newer than 10 seconds,
+			// falls under its own bucket. Upstream compared parts[idx-1], an
+			// index into the whole path, while looping over its tail: it read
+			// the wrong segment and the rule never fired. It also wrote nothing
+			// for a message in between, which would have merged the delete
+			// into the queue of GET and POST on the channel's messages.
+			if currMajor == MajorChannels && method == "DELETE" && idx == len(tail)-1 && idx > 0 && tail[idx-1] == "messages" {
 				createdAt, _ := GetSnowflakeCreatedAt(part)
-				if createdAt.Before(time.Now().Add(-1 * 14 * 24 * time.Hour)) {
+				switch {
+				case createdAt.Before(time.Now().Add(-14 * 24 * time.Hour)):
 					bucket.WriteString("/!14dmsg")
-				} else if createdAt.After(time.Now().Add(-1 * 10 * time.Second)) {
+				case createdAt.After(time.Now().Add(-10 * time.Second)):
 					bucket.WriteString("/!10smsg")
+				default:
+					bucket.WriteString("/!")
 				}
 				continue
 			}
