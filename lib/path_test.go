@@ -92,3 +92,17 @@ func TestSetDiscordURL(t *testing.T) {
 		}
 	}
 }
+
+// A long query value is not an interaction token. strings.SplitN(url, "?", 1)
+// never splits, so upstream inspected the query too, and a request carrying a
+// long enough query value was treated as an interaction: exempt from the 401
+// lock and from the webhook 404 lock.
+func TestQueryIsNotAnInteractionToken(t *testing.T) {
+	url := "/api/v10/channels/203039963636301824/messages?around=" + strings.Repeat("9", 200)
+	if isInteraction(url) {
+		t.Error("a long query value was taken for an interaction token")
+	}
+	if path := GetOptimisticBucketPath(url, "GET"); strings.Contains(path, "?") {
+		t.Errorf("query leaked into the bucket path: %q", path)
+	}
+}

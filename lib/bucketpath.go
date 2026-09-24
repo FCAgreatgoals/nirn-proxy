@@ -67,7 +67,7 @@ func GetMetricsPath(route string) string {
 func GetOptimisticBucketPath(url string, method string) string {
 	bucket := strings.Builder{}
 	bucket.WriteByte('/')
-	cleanUrl := strings.SplitN(url, "?", 1)[0]
+	cleanUrl := strings.SplitN(url, "?", 2)[0]
 	if strings.HasPrefix(cleanUrl, "/api/v") {
 		cleanUrl = strings.ReplaceAll(cleanUrl, "/api/v", "")
 		l := len(cleanUrl)
