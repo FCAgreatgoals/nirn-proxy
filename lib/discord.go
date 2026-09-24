@@ -5,18 +5,42 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"io"
 	"io/ioutil"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
 var client *http.Client
+
+// discordURL is where requests are sent. DISCORD_URL overrides it, the name
+// WelcomerTeam's fork chose, so the proxy can sit in front of a Discord
+// simulator or a recording proxy.
+var discordURL = "https://discord.com"
+
+// SetDiscordURL changes where requests are sent. It takes a scheme and a
+// host, with no path: the request path is appended as is.
+func SetDiscordURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("DISCORD_URL must be http or https, got %q", raw)
+	}
+	if parsed.Host == "" || strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != "" {
+		return fmt.Errorf("DISCORD_URL must be a scheme and a host only, got %q", raw)
+	}
+	discordURL = parsed.Scheme + "://" + parsed.Host
+	return nil
+}
 
 var contextTimeout time.Duration
 
@@ -217,7 +241,7 @@ func GetBotUser(token string) (*BotUserResponse, error) {
 }
 
 func doDiscordReq(ctx context.Context, path string, method string, body io.ReadCloser, header http.Header, query string) (*http.Response, error) {
-	discordReq, err := http.NewRequestWithContext(ctx, method, "https://discord.com"+path+"?"+query, body)
+	discordReq, err := http.NewRequestWithContext(ctx, method, discordURL+path+"?"+query, body)
 	if err != nil {
 		return nil, err
 	}

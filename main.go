@@ -76,6 +76,10 @@ func main() {
 
 	disableGlobalRatelimitDetection := lib.EnvGetBool("DISABLE_GLOBAL_RATELIMIT_DETECTION", false)
 
+	if err := lib.SetDiscordURL(lib.EnvGet("DISCORD_URL", "https://discord.com")); err != nil {
+		logger.WithFields(logrus.Fields{"function": "SetDiscordURL"}).Fatal(err)
+	}
+
 	lib.ConfigureDiscordHTTPClient(outboundIp, time.Duration(timeout)*time.Millisecond, disableHttp2, globalOverrides, disableGlobalRatelimitDetection)
 
 	port := lib.EnvGet("PORT", "8080")

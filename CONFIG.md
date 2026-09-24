@@ -30,6 +30,11 @@ The IP to bind the HTTP server on (both for requests and metrics). 127.0.0.1 wil
 
 Example: `10.0.0.42` - Would only listen on LAN
 
+##### DISCORD_URL
+Where requests are sent, as a scheme and a host with no path. Useful to put the proxy in front of a Discord simulator or a recording proxy.
+
+Default: https://discord.com
+
 ##### REQUEST_TIMEOUT
 Defines the amount of time the proxy will wait for a response from discord. Does not include time waiting for ratelimits to clear.
 
