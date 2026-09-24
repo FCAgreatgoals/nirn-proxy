@@ -46,7 +46,13 @@ var contextTimeout time.Duration
 
 var globalOverrideMap = make(map[string]uint)
 
-var disableRestLimitDetection = false
+// disableRestLimitDetection is on by default. The detection infers the global
+// limit from /gateway/bot's max_concurrency (500, or 25 per unit), a heuristic
+// Discord does not document and upstream itself called optimistic, planning to
+// make disabling it "the only possible behavior". It also spends the
+// /gateway/bot budget, measured at 2 requests per 5 seconds, which the bot's
+// own shards need when they start.
+var disableRestLimitDetection = true
 
 type BotGatewayResponse struct {
 	SessionStartLimit map[string]int `json:"session_start_limit"`
