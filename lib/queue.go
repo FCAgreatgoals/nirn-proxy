@@ -305,6 +305,11 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			continue
 		}
 
+		if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
+			item.errChan <- err
+			continue
+		}
+
 		resp, err := q.processor(ctx, item)
 		if err != nil {
 			item.errChan <- err
@@ -316,9 +321,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		_, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
 
 		if isGlobal {
-			//Lock global
-			sw := atomic.CompareAndSwapInt64(q.globalLockedUntil, 0, time.Now().Add(resetAfter).UnixNano())
-			if sw {
+			if lockGlobal(q.globalLockedUntil, time.Now().Add(resetAfter)) {
 				logger.WithFields(logrus.Fields{
 					"until":      time.Now().Add(resetAfter),
 					"resetAfter": resetAfter,
