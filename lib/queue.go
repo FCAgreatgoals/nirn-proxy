@@ -387,8 +387,21 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		}
 
 		if remaining == 0 || resp.StatusCode == 429 {
-			duration := time.Until(time.Now().Add(resetAfter))
-			time.Sleep(duration)
+			wait := resetAfter
+			if resp.StatusCode == 429 {
+				if hold := sublimitHold(resp.Header, scope, resetAfter); hold > wait {
+					// Only this queue sleeps: renames have one of their
+					// own, so the channel's other edits keep flowing.
+					wait = hold
+					logger.WithFields(logrus.Fields{
+						"bucket":     path,
+						"method":     item.Req.Method,
+						"holdFor":    hold,
+						"resetAfter": resetAfter,
+					}).Warn("Sublimit hit, holding this route until it lifts")
+				}
+			}
+			time.Sleep(wait)
 		}
 		prevRem, prevReset = remaining, resetAfter
 	}

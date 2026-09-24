@@ -262,6 +262,9 @@ func (m *QueueManager) DiscordRequestHandler(resp http.ResponseWriter, req *http
 
 func (m *QueueManager) GetRequestRoutingInfo(req *http.Request, token string) (routingHash uint64, path string, queueType QueueType) {
 	path = GetOptimisticBucketPath(req.URL.Path, req.Method)
+	// Before the routing hash: a request set apart by a sublimit lands in its
+	// own queue, on whichever node owns it.
+	path = sublimitPath(req, path)
 	queueType = NoAuth
 	routingHash = HashCRC64(path)
 
