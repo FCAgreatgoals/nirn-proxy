@@ -72,6 +72,17 @@ The ratelimiting only works with `X-RateLimit-Precision` set to `seconds`. If yo
 
 The proxy tries its best to detect your REST global limits, but Discord does not expose this information. Be sure to set `BOT_RATELIMIT_OVERRIDES` for any clients with elevated limits.
 
+### Checking the proxy against Discord
+
+[bucketmap](https://github.com/FCAgreatgoals/bucketmap) walks a test guild through every Discord REST route a bot can reach, a few requests each, and reports what each answered and which bucket it fell in. Run it once against Discord and once through the proxy, then compare: the proxy conforms when every step answers the same and nothing through it hits a 429.
+
+```sh
+go install github.com/FCAgreatgoals/bucketmap/cmd/bucketmap@latest
+bucketmap run -guild GUILD_ID -users USER1,USER2,USER3,USER4 -report direct.json
+bucketmap run -api http://localhost:8080/api/v10 -guild GUILD_ID -users USER1,USER2,USER3,USER4 -report proxied.json
+bucketmap compare direct.json proxied.json
+```
+
 ### High availability
 
 The proxy can be run in a cluster by setting either `CLUSTER_MEMBERS` or `CLUSTER_DNS` env vars. When in cluster mode, all nodes are a suitable gateway for all requests and the proxy will route requests consistently using the bucket hash.
@@ -128,6 +139,8 @@ The proxy can be profiled at runtime by enabling the ENABLE_PPROF flag and brows
 ### Related projects
 
 [nirn-probe](https://github.com/germanoeich/nirn-probe) - Checks and alerts if a server is cloudflare banned
+
+[bucketmap](https://github.com/FCAgreatgoals/bucketmap) - Index of every Discord REST route and its rate limit, with a conformance engine to check the proxy against Discord
 
 ##### Acknowledgements
 - [Eris](https://github.com/abalabahaha/eris) - used as reference throughout this project
