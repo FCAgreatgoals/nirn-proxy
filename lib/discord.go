@@ -279,7 +279,10 @@ func ProcessRequest(ctx context.Context, item *QueueItem) (*http.Response, error
 
 	ctx, cancel := context.WithTimeout(ctx, contextTimeout)
 	defer cancel()
-	discordResp, err := doDiscordReq(ctx, req.URL.Path, req.Method, req.Body, req.Header.Clone(), req.URL.RawQuery)
+	// The path as the client encoded it. Rebuilding the URL from the decoded
+	// path turned the "#" of a keycap emoji into a fragment, and the reaction
+	// request reached Discord truncated to ".../reactions/".
+	discordResp, err := doDiscordReq(ctx, req.URL.EscapedPath(), req.Method, req.Body, req.Header.Clone(), req.URL.RawQuery)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
