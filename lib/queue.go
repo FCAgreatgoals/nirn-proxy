@@ -305,9 +305,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			continue
 		}
 
-		if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
-			item.errChan <- err
-			continue
+		// A global lock holds everything but interaction answers, which the
+		// global limit does not apply to.
+		if !IsInteractionEndpoint(item.Req.URL.Path) {
+			if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
+				item.errChan <- err
+				continue
+			}
 		}
 
 		resp, err := q.processor(ctx, item)
