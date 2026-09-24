@@ -313,7 +313,9 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 			return
 		}
 
-		if q.identifier != "NoAuth" {
+		// Interaction endpoints are not bound to the global rate limit, so they
+		// neither wait on it nor spend it.
+		if q.identifier != "NoAuth" && !IsInteractionEndpoint(req.URL.Path) {
 			var botHash uint64 = 0
 			if q.user != nil {
 				botHash = HashCRC64(q.user.Id)
