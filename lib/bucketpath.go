@@ -89,13 +89,13 @@ func GetOptimisticBucketPath(url string, method string) string {
 	// ! stands for any replaceable id
 	switch parts[0] {
 	case MajorChannels:
-		if numParts == 2 {
-			// Return the same bucket for all reqs to /channels/id
-			// In this case, the discord bucket is the same regardless of the id
-			bucket.WriteString(MajorChannels)
-			bucket.WriteString("/!")
-			return bucket.String()
-		}
+		// Every channel keeps its own queue, /channels/{id} itself included.
+		// Upstream merged that route across all channels on the grounds that
+		// Discord returns the same bucket for every id. It does, but the
+		// bucket names the rule, not the counter: channel_id is a major
+		// parameter, so each channel counts separately. Merged, locking a
+		// hundred channels during a raid went through one queue, and one
+		// channel running out of budget put all the others to sleep.
 		bucket.WriteString(MajorChannels)
 		bucket.WriteByte('/')
 		bucket.WriteString(parts[1])
@@ -105,10 +105,9 @@ func GetOptimisticBucketPath(url string, method string) string {
 		bucket.WriteString("/!")
 		currMajor = MajorInvites
 	case MajorGuilds:
-		// guilds/:guildId/channels share the same bucket for all guilds
-		if numParts == 3 && parts[2] == "channels" {
-			return "/" + MajorGuilds + "/!/channels"
-		}
+		// guild_id is a major parameter, so /guilds/{id}/channels counts per
+		// guild like everything else under it. Upstream merged it across
+		// guilds for the same reason it merged /channels/{id}.
 		fallthrough
 	case MajorInteractions:
 		if numParts == 4 && parts[3] == "callback" {
