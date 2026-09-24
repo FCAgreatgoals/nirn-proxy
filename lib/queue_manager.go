@@ -191,7 +191,9 @@ func Generate429(resp *http.ResponseWriter) {
 	writer.Header().Set("x-ratelimit-limit", "1")
 	writer.Header().Set("x-ratelimit-remaining", "0")
 	writer.Header().Set("x-ratelimit-reset", strconv.FormatInt(time.Now().Add(1*time.Second).Unix(), 10))
-	writer.Header().Set("x-ratelimit-after", "1")
+	// Upstream wrote "x-ratelimit-after", a header Discord never sends, so a
+	// client pacing itself on X-RateLimit-Reset-After found nothing here.
+	writer.Header().Set("x-ratelimit-reset-after", "1")
 	writer.Header().Set("retry-after", "1")
 	writer.Header().Set("content-type", "application/json")
 	writer.WriteHeader(429)
