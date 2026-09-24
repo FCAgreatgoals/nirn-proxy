@@ -114,6 +114,8 @@ This will vary depending on your usage, how many unique routes you see, etc. For
 |nirn_proxy_requests_routed_sent     | none                                   | Counter for requests routed to other nodes                 |
 |nirn_proxy_requests_routed_received | none                                   | Counter for requests received from other nodes             |
 |nirn_proxy_requests_routed_error    | none                                   | Counter for requests routed that failed                    |
+|nirn_proxy_invalid_requests         | status                                 | Counter for responses Discord counts as invalid (401, 403, and 429 not scoped shared) |
+|nirn_proxy_invalid_requests_window  | none                                   | Gauge for invalid requests over the last ten minutes, against Discord's limit of 10,000 per IP |
 
 Note: 429s can produce two status: 429 Too Many Requests or 429 Shared. The latter is only produced for requests that return with the x-ratelimit-scope header set to "shared", which means they don't count towards the cloudflare firewall limit and thus should not be used for alerts, etc.
 
