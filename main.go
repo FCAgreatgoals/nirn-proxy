@@ -62,7 +62,11 @@ func initCluster(proxyPort string, manager *lib.QueueManager) *memberlist.Member
 		}
 	}
 
-	return lib.InitMemberList(members, port, proxyPort, manager)
+	advertiseAddr, err := lib.ResolveAdvertiseAddr(os.Getenv("CLUSTER_ADVERTISE_ADDR"))
+	if err != nil {
+		logger.WithFields(logrus.Fields{"function": "ResolveAdvertiseAddr"}).Fatal(err)
+	}
+	return lib.InitMemberList(members, port, proxyPort, advertiseAddr, manager)
 }
 
 func main() {
