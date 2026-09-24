@@ -1,7 +1,9 @@
 package lib
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -43,5 +45,30 @@ func TestTokenBucketIsNeverSentIntoTheLimit(t *testing.T) {
 	full, _ := strconv.ParseFloat(resets[4], 64)
 	if gap := fake.call(5).at.Sub(fake.call(4).at); gap < time.Duration(full*float64(time.Second))-100*time.Millisecond {
 		t.Errorf("sixth request sent %v after the bucket emptied, Discord announced %ss until it refills", gap, resets[4])
+	}
+}
+
+// A 429 the proxy makes up itself looks like Discord's: the documented body,
+// and the headers a client paces itself on.
+func TestGenerated429LooksLikeDiscords(t *testing.T) {
+	rec := httptest.NewRecorder()
+	var w http.ResponseWriter = rec
+	Generate429(&w)
+
+	if rec.Code != 429 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	for _, name := range []string{"Retry-After", "X-RateLimit-Reset-After", "X-RateLimit-Remaining"} {
+		if rec.Header().Get(name) == "" {
+			t.Errorf("%s missing", name)
+		}
+	}
+	var body struct {
+		Message    string   `json:"message"`
+		RetryAfter *float64 `json:"retry_after"`
+		Global     *bool    `json:"global"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.RetryAfter == nil || body.Global == nil || body.Message == "" {
+		t.Errorf("body = %s", rec.Body.String())
 	}
 }
