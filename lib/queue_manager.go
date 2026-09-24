@@ -155,12 +155,14 @@ func (m *QueueManager) calculateRoute(pathHash uint64) string {
 }
 
 func (m *QueueManager) routeRequest(addr string, req *http.Request) (*http.Response, error) {
-	nodeReq, err := http.NewRequestWithContext(req.Context(), req.Method, "http://"+addr+req.URL.Path+"?"+req.URL.RawQuery, req.Body)
-	nodeReq.Header = req.Header.Clone()
-	nodeReq.Header.Set("nirn-routed-to", addr)
+	// The encoded path, for the same reason as in ProcessRequest: the node
+	// that owns the bucket must receive the path the client sent.
+	nodeReq, err := http.NewRequestWithContext(req.Context(), req.Method, "http://"+addr+req.URL.EscapedPath()+"?"+req.URL.RawQuery, req.Body)
 	if err != nil {
 		return nil, err
 	}
+	nodeReq.Header = req.Header.Clone()
+	nodeReq.Header.Set("nirn-routed-to", addr)
 
 	logger.WithFields(logrus.Fields{
 		"to":     addr,
@@ -189,7 +191,9 @@ func Generate429(resp *http.ResponseWriter) {
 	writer.Header().Set("x-ratelimit-limit", "1")
 	writer.Header().Set("x-ratelimit-remaining", "0")
 	writer.Header().Set("x-ratelimit-reset", strconv.FormatInt(time.Now().Add(1*time.Second).Unix(), 10))
-	writer.Header().Set("x-ratelimit-after", "1")
+	// Upstream wrote "x-ratelimit-after", a header Discord never sends, so a
+	// client pacing itself on X-RateLimit-Reset-After found nothing here.
+	writer.Header().Set("x-ratelimit-reset-after", "1")
 	writer.Header().Set("retry-after", "1")
 	writer.Header().Set("content-type", "application/json")
 	writer.WriteHeader(429)
@@ -260,6 +264,10 @@ func (m *QueueManager) DiscordRequestHandler(resp http.ResponseWriter, req *http
 
 func (m *QueueManager) GetRequestRoutingInfo(req *http.Request, token string) (routingHash uint64, path string, queueType QueueType) {
 	path = GetOptimisticBucketPath(req.URL.Path, req.Method)
+	// Before the routing hash: a request set apart by a sublimit lands in its
+	// own queue, on whichever node owns it.
+	path = sublimitPath(req, path)
+	path = interactionQueuePath(req, path)
 	queueType = NoAuth
 	routingHash = HashCRC64(path)
 
@@ -311,7 +319,9 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 			return
 		}
 
-		if q.identifier != "NoAuth" {
+		// Interaction endpoints are not bound to the global rate limit, so they
+		// neither wait on it nor spend it.
+		if q.identifier != "NoAuth" && !IsInteractionEndpoint(req.URL.Path) {
 			var botHash uint64 = 0
 			if q.user != nil {
 				botHash = HashCRC64(q.user.Id)

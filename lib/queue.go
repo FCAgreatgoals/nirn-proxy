@@ -274,7 +274,7 @@ func return401(item *QueueItem) {
 }
 
 func isInteraction(url string) bool {
-	parts := strings.Split(strings.SplitN(url, "?", 1)[0], "/")
+	parts := strings.Split(strings.SplitN(url, "?", 2)[0], "/")
 	for _, p := range parts {
 		if len(p) > 128 {
 			return true
@@ -305,6 +305,15 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			continue
 		}
 
+		// A global lock holds everything but interaction answers, which the
+		// global limit does not apply to.
+		if !IsInteractionEndpoint(item.Req.URL.Path) {
+			if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
+				item.errChan <- err
+				continue
+			}
+		}
+
 		resp, err := q.processor(ctx, item)
 		if err != nil {
 			item.errChan <- err
@@ -316,9 +325,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		_, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
 
 		if isGlobal {
-			//Lock global
-			sw := atomic.CompareAndSwapInt64(q.globalLockedUntil, 0, time.Now().Add(resetAfter).UnixNano())
-			if sw {
+			if lockGlobal(q.globalLockedUntil, time.Now().Add(resetAfter)) {
 				logger.WithFields(logrus.Fields{
 					"until":      time.Now().Add(resetAfter),
 					"resetAfter": resetAfter,
@@ -331,6 +338,8 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			continue
 		}
 		item.doneChan <- resp
+
+		trackInvalidRequest(resp.StatusCode, scope, q.identifier, path)
 
 		if resp.StatusCode == 429 && scope != "shared" {
 			logger.WithFields(logrus.Fields{
@@ -349,7 +358,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			}).Warn("Unexpected 429")
 		}
 
-		if resp.StatusCode == 404 && strings.HasPrefix(path, "/webhooks/") && !isInteraction(item.Req.URL.String()) {
+		if resp.StatusCode == 404 && strings.HasPrefix(path, "/webhooks/") && !isInteraction(item.Req.URL.String()) && isUnknownWebhook(resp) {
 			logger.WithFields(logrus.Fields{
 				"bucket": path,
 				"route":  item.Req.URL.String(),
@@ -380,8 +389,21 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		}
 
 		if remaining == 0 || resp.StatusCode == 429 {
-			duration := time.Until(time.Now().Add(resetAfter))
-			time.Sleep(duration)
+			wait := resetAfter
+			if resp.StatusCode == 429 {
+				if hold := sublimitHold(resp.Header, scope, resetAfter); hold > wait {
+					// Only this queue sleeps: renames have one of their
+					// own, so the channel's other edits keep flowing.
+					wait = hold
+					logger.WithFields(logrus.Fields{
+						"bucket":     path,
+						"method":     item.Req.Method,
+						"holdFor":    hold,
+						"resetAfter": resetAfter,
+					}).Warn("Sublimit hit, holding this route until it lifts")
+				}
+			}
+			time.Sleep(wait)
 		}
 		prevRem, prevReset = remaining, resetAfter
 	}

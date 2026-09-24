@@ -30,6 +30,11 @@ The IP to bind the HTTP server on (both for requests and metrics). 127.0.0.1 wil
 
 Example: `10.0.0.42` - Would only listen on LAN
 
+##### DISCORD_URL
+Where requests are sent, as a scheme and a host with no path. Useful to put the proxy in front of a Discord simulator or a recording proxy.
+
+Default: https://discord.com
+
 ##### REQUEST_TIMEOUT
 Defines the amount of time the proxy will wait for a response from discord. Does not include time waiting for ratelimits to clear.
 
@@ -40,6 +45,11 @@ Sets the port that's going to be used to communicate with other cluster members.
 Comma separated list of stable/known members of the cluster. Does not need to include all members, a gossip protocol is used for discovery. You may include a port along with the address and if you don't, CLUSTER_PORT is used. This variable overrides CLUSTER_DNS.
 
 Example: `10.0.0.2,10.0.0.3:7244`
+
+##### CLUSTER_ADVERTISE_ADDR
+The address this node advertises to the other cluster nodes. Leave empty to let memberlist pick it. Inside a container that pick can be unreachable from the other nodes: set an IP address or a host name, or `auto` to take the first non-loopback IPv4 of the host.
+
+Default: empty
 
 ##### CLUSTER_DNS
 DNS address that will resolve to multiple members of the cluster. Does not need to include all members, a gossip protocol is used for discovery. While this is the recommended method of discovery for Kubernetes or similar, it does come with a limitation, which is that all nodes must use the same port for communication since DNS can't return port information. The port used by the proxy for requests is broadcasted automatically and doesn't need to be the same for nodes.
@@ -60,20 +70,18 @@ This flag defaults to true due to go http2 support having a few minor issues tha
 Default: true
 
 ##### BOT_RATELIMIT_OVERRIDES
-Allows you to define custom global request limits for one or multiple bots. The default is 50 for bots with concurrency = 1 (/gateway/bot -> session_start_limit.max_concurrency field), 500 for concurrency 16 and based on a formula for higher concurrency values. This does not always represents the correct REST limit though, in those cases, you can manually set it using this flag.
+Allows you to define custom global request limits for one or multiple bots. The default is 50, the limit Discord documents for every bot unless its support raises it. Set this for a bot whose limit was raised.
 
 Format: Command separated list of **user id** and limit combo, separated by `:` and with no spaces at all. Don't use application ids.
 Example: `392827169497284619:100,227115752396685313:80`
 
 
 ##### DISABLE_GLOBAL_RATELIMIT_DETECTION
-Disables the optimistic global rest limit detection. This detection uses the /gateway/bot endpoint, which has a low ratelimit and can cause issues with requests being dropped/delayed as cluster size grows.
+Disables the optimistic global rest limit detection, which infers the limit from /gateway/bot (50 for concurrency 1, 500 for concurrency 16, and a formula above). Discord does not document that relation, and /gateway/bot has a low ratelimit (2 requests per 5 seconds) that the bot's own shards need when they start.
 
-You probably want to set BOT_RATELIMIT_OVERRIDES if you set this to true.
+Set it to false to bring the detection back. Otherwise use BOT_RATELIMIT_OVERRIDES for bots whose limit was raised.
 
-Default: false
-
-In the future, this will be the only possible behavior.
+Default: true
 
 ## Unstable env vars
 Collection of env vars that may be removed at any time, mainly used for Discord introducing new behaviour on their edge api versions
