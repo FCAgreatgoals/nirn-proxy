@@ -274,7 +274,7 @@ func return401(item *QueueItem) {
 }
 
 func isInteraction(url string) bool {
-	parts := strings.Split(strings.SplitN(url, "?", 1)[0], "/")
+	parts := strings.Split(strings.SplitN(url, "?", 2)[0], "/")
 	for _, p := range parts {
 		if len(p) > 128 {
 			return true
