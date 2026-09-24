@@ -1,6 +1,9 @@
 package lib
 
-import "strings"
+import (
+	"net/http"
+	"strings"
+)
 
 // interactionTokenPrefix is "interaction:" in base64. Discord interaction tokens
 // are the base64 encoding of "interaction:<id>:<secret>".
@@ -48,4 +51,25 @@ func IsInteractionEndpoint(path string) bool {
 		return true
 	}
 	return false
+}
+
+// interactionQueuePath gathers every webhook route of one interaction into a
+// single queue.
+//
+// Discord counts them together: in a capture of real traffic, sending a
+// followup and reading, editing or deleting the original response all return
+// the same X-RateLimit-Bucket. Upstream already kept each interaction apart,
+// keyed by the id it decodes from the token, but still queued the followup
+// route and the original response separately, so both could spend the same
+// counter at once. One interaction makes few requests, so queueing them
+// together costs nothing and keeps the shared counter honest.
+func interactionQueuePath(req *http.Request, path string) string {
+	if !strings.HasPrefix(path, "/"+MajorWebhooks+"/") || !IsInteractionEndpoint(req.URL.Path) {
+		return path
+	}
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 4)
+	if len(parts) < 3 {
+		return path
+	}
+	return "/" + strings.Join(parts[:3], "/")
 }

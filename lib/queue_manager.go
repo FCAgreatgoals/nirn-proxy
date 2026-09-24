@@ -265,6 +265,7 @@ func (m *QueueManager) GetRequestRoutingInfo(req *http.Request, token string) (r
 	// Before the routing hash: a request set apart by a sublimit lands in its
 	// own queue, on whichever node owns it.
 	path = sublimitPath(req, path)
+	path = interactionQueuePath(req, path)
 	queueType = NoAuth
 	routingHash = HashCRC64(path)
 
