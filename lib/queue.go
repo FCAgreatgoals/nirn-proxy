@@ -339,6 +339,8 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		}
 		item.doneChan <- resp
 
+		trackInvalidRequest(resp.StatusCode, scope, q.identifier, path)
+
 		if resp.StatusCode == 429 && scope != "shared" {
 			logger.WithFields(logrus.Fields{
 				"prevRemaining":  prevRem,
