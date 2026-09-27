@@ -67,10 +67,11 @@ func TestSublimitHold(t *testing.T) {
 		scope      string
 		hold       time.Duration
 	}{
-		{"3", "user", 0},                   // Retry-After rounds the reset up: an ordinary 429
-		{"540", "user", 540 * time.Second}, // far beyond the bucket's reset: a sublimit
-		{"540", "shared", 0},               // other scopes have their own handling
-		{"540", "global", 0},
+		{"3", "user", 0},                     // Retry-After rounds the reset up: an ordinary 429
+		{"540", "user", 540 * time.Second},   // far beyond the bucket's reset: a sublimit
+		{"899", "shared", 899 * time.Second}, // a resource limit, such as prune's
+		{"1", "shared", 0},                   // an ordinary shared 429
+		{"540", "global", 0},                 // the global lock has its own handling
 		{"", "user", 0},
 	}
 	for _, c := range cases {

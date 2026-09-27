@@ -83,8 +83,14 @@ func sublimitPath(req *http.Request, path string) string {
 // sublimitHold tells how long a queue must hold after a 429 that reads as a
 // sublimit: Retry-After well beyond the bucket's reset, on a bucket scoped to
 // the user. Zero means an ordinary 429, which the bucket's reset covers.
+//
+// A shared 429 reads the same way: a limit on the resource, not the bot, that
+// the headers never announce. A bucketmap run found one on prune, which
+// Discord refuses for fifteen minutes after a first one (30040, Retry-After
+// 899) while its bucket announces a thousand requests left. Upstream let the
+// next prune through into the same refusal.
 func sublimitHold(header http.Header, scope string, resetAfter time.Duration) time.Duration {
-	if scope != "user" {
+	if scope != "user" && scope != "shared" {
 		return 0
 	}
 	retryAfter, err := strconv.ParseFloat(header.Get("Retry-After"), 64)
