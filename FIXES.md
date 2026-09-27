@@ -31,8 +31,21 @@ and a capture of real Discord responses taken through a transparent proxy.
 | 14 | The rule that gives deletes of messages older than 14 days (and newer than 10 seconds) their own queue never fires: it indexes the full path while looping over its tail, so it compares against the wrong segment | reproduced: a 30 day old message lands in `/messages/!` | davfsa, Melonly | fixed, tested |
 | 15 | The 429 the proxy makes up itself sets `x-ratelimit-after`, a header Discord never sends, instead of `X-RateLimit-Reset-After` | code | none | fixed, tested |
 | 16 | A node advertises whatever address memberlist guesses, which inside a container can be unreachable from the other nodes | code | DraftBot (first IPv4), PluralKit (configured host) | fixed: `CLUSTER_ADVERTISE_ADDR`, empty keeps upstream behaviour, `auto` is DraftBot's guess, a host is resolved as PluralKit does |
+| 17 | The queue sleeps exactly X-RateLimit-Reset-After, but Discord does not always reopen a bucket at the instant it announces: a one request bucket refused a request sent 5.001 s after a Reset-After of 5, with 0.3 s more to wait | bucketmap runs against Discord, twice (scheduled event, reactions) | none (discordgo and arikawa add 250 ms for the same reason) | fixed: 400 ms more whenever a reset was announced, tested |
+| 18 | Routes Discord counts in one bucket are queued apart, so they send into it side by side: a channel's edit with its permission overwrites and the guild's channel order, every route of a webhook token, a command's global and guild edits, eighteen families in all | bucketmap runs: routes answering with one X-RateLimit-Bucket | none | fixed: one queue per family and major parameter, read from bucketmap's route index; reactions and renames keep their queues, tested |
+| 19 | A shared 429 that asks for far longer than the bucket's reset lets the next request through into the same refusal: a second prune within fifteen minutes is refused (30040, Retry-After 899) while the bucket announces a thousand requests left | bucketmap run against Discord | none | fixed: the route holds until Retry-After, as a sublimit does, tested |
 
 Upstream queues ignore the HTTP method, which makes them coarser than Discord's buckets (`GET` and `POST` on a channel's messages share a queue). That only ever waits more than needed, never sends into a limit, so it is left as is. For the same reason, adding then removing a member role is already coordinated: both land in the same queue.
+
+## Measured with bucketmap
+
+[bucketmap](https://github.com/FCAgreatgoals/bucketmap) walks a test guild through every route a bot can reach and reports what each answered and which bucket it fell in. Six runs against Discord in September 2026 found fixes 17 to 19, and a few facts worth keeping in mind:
+
+- Every reaction route shares one bucket per channel, one request every quarter second. The 250 ms pause DraftBot removed matched it; the headers now carry it, and fix 17 covers the reopening lag.
+- 57 routes are not limited on their own at all: Discord answers them with a limit of a thousand resetting within a millisecond.
+- Some limits never show in headers: channel renames, prune.
+
+Running bucketmap against Discord, then through the proxy, and comparing both reports is how a fix's "Real Discord" box gets ticked.
 
 ## Rate limit models
 
