@@ -337,6 +337,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			item.errChan <- err
 			continue
 		}
+		learnBucket(item.Req, resp.Header)
 		item.doneChan <- resp
 
 		trackInvalidRequest(resp.StatusCode, scope, q.identifier, path)
