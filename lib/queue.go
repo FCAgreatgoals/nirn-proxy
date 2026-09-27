@@ -389,7 +389,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		}
 
 		if remaining == 0 || resp.StatusCode == 429 {
+			// Only a reset Discord announced gets the margin: an answer
+			// without rate limit headers reads as nothing left and nothing
+			// to wait.
 			wait := resetAfter
+			if wait > 0 {
+				wait += resetMargin
+			}
 			if resp.StatusCode == 429 {
 				if hold := sublimitHold(resp.Header, scope, resetAfter); hold > wait {
 					// Only this queue sleeps: renames have one of their
