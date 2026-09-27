@@ -358,7 +358,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			}).Warn("Unexpected 429")
 		}
 
-		if resp.StatusCode == 404 && strings.HasPrefix(path, "/webhooks/") && !isInteraction(item.Req.URL.String()) && isUnknownWebhook(resp) {
+		if resp.StatusCode == 404 && strings.HasPrefix(trimAPIPrefix(item.Req.URL.Path), "/webhooks/") && !isInteraction(item.Req.URL.String()) && isUnknownWebhook(resp) {
 			logger.WithFields(logrus.Fields{
 				"bucket": path,
 				"route":  item.Req.URL.String(),
