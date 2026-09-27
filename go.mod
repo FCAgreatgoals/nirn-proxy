@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	github.com/FCAgreatgoals/bucketmap v0.2.0 // indirect
 	github.com/armon/go-metrics v0.0.0-20180917152333-f0300d1749da // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.1 // indirect
