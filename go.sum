@@ -1,8 +1,8 @@
 cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 github.com/Clever/leakybucket v1.2.0 h1:tj9bHR6QS6c5Crszv+EP66NcbJxLabwZ90CUqNlFsSw=
 github.com/Clever/leakybucket v1.2.0/go.mod h1:gZbI9EI3nNh9loJzrwobjtPUh3fuOT2Q6GgqtBHFuc4=
-github.com/FCAgreatgoals/bucketmap v0.2.0 h1:Mc9yxZKSYQp9NLiufiZyzUsNjDOcALYzjUqQofNWoV4=
-github.com/FCAgreatgoals/bucketmap v0.2.0/go.mod h1:U3NmaOBjcI22NYmYbxg8AsvQVwsg295m9zyIuDE4eDc=
+github.com/FCAgreatgoals/bucketmap v0.2.1 h1:X1E34ivC0BFdcvZhGjN4DglKv3OYiOLKWmkD9LxVevg=
+github.com/FCAgreatgoals/bucketmap v0.2.1/go.mod h1:U3NmaOBjcI22NYmYbxg8AsvQVwsg295m9zyIuDE4eDc=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=

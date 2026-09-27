@@ -268,7 +268,7 @@ func (m *QueueManager) GetRequestRoutingInfo(req *http.Request, token string) (r
 	// own queue, on whichever node owns it.
 	path = sublimitPath(req, path)
 	path = interactionQueuePath(req, path)
-	path = familyPath(req, path)
+	path = bucketQueuePath(req, path)
 	queueType = NoAuth
 	routingHash = HashCRC64(path)
 
