@@ -33,7 +33,7 @@ and a capture of real Discord responses taken through a transparent proxy.
 | 16 | A node advertises whatever address memberlist guesses, which inside a container can be unreachable from the other nodes | code | DraftBot (first IPv4), PluralKit (configured host) | fixed: `CLUSTER_ADVERTISE_ADDR`, empty keeps upstream behaviour, `auto` is DraftBot's guess, a host is resolved as PluralKit does |
 | 17 | The queue sleeps exactly X-RateLimit-Reset-After, but Discord does not always reopen a bucket at the instant it announces: a one request bucket refused a request sent 5.001 s after a Reset-After of 5, with 0.3 s more to wait | bucketmap runs against Discord, twice (scheduled event, reactions) | none (discordgo and arikawa add 250 ms for the same reason) | fixed: 400 ms more whenever a reset was announced, tested |
 | 18 | Routes Discord counts in one bucket are queued apart, so they send into it side by side: a channel's edit with its permission overwrites and the guild's channel order, every route of a webhook token, a command's global and guild edits, eighteen families in all. Upstream reads X-RateLimit-Bucket only to log it | bucketmap runs: every pair of routes answering with one bucket and one major value drew on one counter, 41 times out of 41 | davfsa and Melonly learn buckets in their rewrites | fixed: a route answered with a bucket queues under it, per major value; before its first answer it takes the family bucketmap's index gives it, the same on every cluster node; reactions and renames keep their queues, tested |
-| 19 | A shared 429 that asks for far longer than the bucket's reset lets the next request through into the same refusal: a second prune within fifteen minutes is refused (30040, Retry-After 899) while the bucket announces a thousand requests left | bucketmap run against Discord | none | fixed: the route holds until Retry-After, as a sublimit does, tested |
+| 19 | A shared 429 that asks for far longer than the bucket's reset lets the next request through into the same refusal: a second prune within fifteen minutes is refused (30040, 899 s to wait) while the bucket announces a thousand requests left. Discord writes `Retry-After: 1` on every shared refusal and the wait only in the body's `retry_after` | bucketmap runs against Discord | none | fixed: the route holds for the longer of Retry-After and the body's `retry_after`, as a sublimit does, tested |
 
 Upstream queues ignore the HTTP method, which makes them coarser than Discord's buckets (`GET` and `POST` on a channel's messages share a queue). That only ever waits more than needed, never sends into a limit, so it is left as is. For the same reason, adding then removing a member role is already coordinated: both land in the same queue.
 
@@ -43,7 +43,8 @@ Upstream queues ignore the HTTP method, which makes them coarser than Discord's 
 
 - Every reaction route shares one bucket per channel, one request every quarter second. The 250 ms pause DraftBot removed matched it; the headers now carry it, and fix 17 covers the reopening lag.
 - 57 routes are not limited on their own at all: Discord answers them with a limit of a thousand resetting within a millisecond.
-- Some limits never show in headers: channel renames, prune.
+- Some limits never show in headers: channel renames, prune, webhook creations, and webhook messages per channel.
+- A shared refusal writes `Retry-After: 1` whatever the wait; the wait is in the body.
 
 Running bucketmap against Discord, then through the proxy, and comparing both reports is how a fix's "Real Discord" box gets ticked.
 

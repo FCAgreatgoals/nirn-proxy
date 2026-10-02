@@ -56,28 +56,70 @@ func TestRenamesGetTheirOwnQueue(t *testing.T) {
 }
 
 func TestSublimitHold(t *testing.T) {
-	header := func(retryAfter string) http.Header {
-		h := http.Header{}
-		h.Set("Retry-After", retryAfter)
-		return h
-	}
 	reset := 2400 * time.Millisecond
 	cases := []struct {
-		retryAfter string
+		retryAfter time.Duration
 		scope      string
 		hold       time.Duration
 	}{
-		{"3", "user", 0},                     // Retry-After rounds the reset up: an ordinary 429
-		{"540", "user", 540 * time.Second},   // far beyond the bucket's reset: a sublimit
-		{"899", "shared", 899 * time.Second}, // a resource limit, such as prune's
-		{"1", "shared", 0},                   // an ordinary shared 429
-		{"540", "global", 0},                 // the global lock has its own handling
-		{"", "user", 0},
+		{3 * time.Second, "user", 0},                   // Retry-After rounds the reset up: an ordinary 429
+		{540 * time.Second, "user", 540 * time.Second}, // far beyond the bucket's reset: a sublimit
+		{899 * time.Second, "shared", 899 * time.Second},
+		{time.Second, "shared", 0},       // an ordinary shared 429
+		{540 * time.Second, "global", 0}, // the global lock has its own handling
+		{0, "user", 0},
 	}
 	for _, c := range cases {
-		if got := sublimitHold(header(c.retryAfter), c.scope, reset); got != c.hold {
-			t.Errorf("Retry-After %q scope %s: hold %v, want %v", c.retryAfter, c.scope, got, c.hold)
+		if got := sublimitHold(c.retryAfter, c.scope, reset); got != c.hold {
+			t.Errorf("wait %v scope %s: hold %v, want %v", c.retryAfter, c.scope, got, c.hold)
 		}
+	}
+}
+
+// A shared 429 says Retry-After: 1 whatever the wait, which only its body
+// carries, as Discord wrote every one bucketmap captured.
+func TestRefusalWaitReadsTheBody(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(
+		`{"message": "Max number of prune requests has been reached. Try again later", "retry_after": 899.41, "global": false, "code": 30040}`))}
+	resp.Header.Set("Retry-After", "1")
+	if got := refusalWait(resp); got != 899410*time.Millisecond {
+		t.Errorf("wait %v, want the body's 899.41s", got)
+	}
+	if rest, _ := io.ReadAll(resp.Body); !strings.Contains(string(rest), "30040") {
+		t.Error("the body was not left readable")
+	}
+
+	plain := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader("not json"))}
+	plain.Header.Set("Retry-After", "3")
+	if got := refusalWait(plain); got != 3*time.Second {
+		t.Errorf("wait %v, want the header's 3s when the body has none", got)
+	}
+}
+
+// A route refused in the shared scope waits what the body asks for, though
+// Retry-After says 1.
+func TestSharedRefusalHoldsForTheBodysWait(t *testing.T) {
+	const wait = 2500 * time.Millisecond
+	first := true
+	fake := &fakeDiscord{answer: func(_ *http.Request, _ []byte) (int, http.Header, string) {
+		h := http.Header{}
+		h.Set("X-RateLimit-Limit", "1000")
+		h.Set("X-RateLimit-Remaining", "999")
+		h.Set("X-RateLimit-Reset-After", "0.001")
+		if first {
+			first = false
+			h.Set("Retry-After", "1")
+			h.Set("X-RateLimit-Scope", "shared")
+			return 429, h, `{"message": "The resource is being rate limited.", "retry_after": 2.5, "global": false}`
+		}
+		return 200, h, "{}"
+	}}
+	q := newTestQueue(fake)
+	path := "/api/v10/guilds/111/prune"
+	q.send(t, "POST", path, `{"days":30}`)
+	q.send(t, "POST", path, `{"days":30}`)
+	if gap := fake.call(1).at.Sub(fake.call(0).at); gap < wait-100*time.Millisecond {
+		t.Errorf("second request reached Discord %v after the refusal, which asked for %v", gap, wait)
 	}
 }
 
