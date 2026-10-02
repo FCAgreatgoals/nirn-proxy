@@ -398,7 +398,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 				wait += resetMargin
 			}
 			if resp.StatusCode == 429 {
-				if hold := sublimitHold(resp.Header, scope, resetAfter); hold > wait {
+				retry := refusalWait(resp)
+				if scope == "shared" && retry > wait {
+					// The resource's own limit, which the bucket's reset
+					// says nothing of: wait what Discord asked for.
+					wait = retry
+				}
+				if hold := sublimitHold(retry, scope, resetAfter); hold >= wait && hold > 0 {
 					// Only this queue sleeps: renames have one of their
 					// own, so the channel's other edits keep flowing.
 					wait = hold

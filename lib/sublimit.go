@@ -81,21 +81,47 @@ func sublimitPath(req *http.Request, path string) string {
 }
 
 // sublimitHold tells how long a queue must hold after a 429 that reads as a
-// sublimit: Retry-After well beyond the bucket's reset, on a bucket scoped to
-// the user. Zero means an ordinary 429, which the bucket's reset covers.
+// sublimit: a wait well beyond the bucket's reset, on a bucket scoped to the
+// user. Zero means an ordinary 429, which the bucket's reset covers.
 //
 // A shared 429 reads the same way: a limit on the resource, not the bot, that
 // the headers never announce. A bucketmap run found one on prune, which
-// Discord refuses for fifteen minutes after a first one (30040, Retry-After
-// 899) while its bucket announces a thousand requests left. Upstream let the
-// next prune through into the same refusal.
-func sublimitHold(header http.Header, scope string, resetAfter time.Duration) time.Duration {
+// Discord refuses for fifteen minutes after a first one (30040, 899 s to wait)
+// while its bucket announces a thousand requests left. Upstream let the next
+// prune through into the same refusal.
+func sublimitHold(retryAfter time.Duration, scope string, resetAfter time.Duration) time.Duration {
 	if scope != "user" && scope != "shared" {
 		return 0
 	}
-	retryAfter, err := strconv.ParseFloat(header.Get("Retry-After"), 64)
-	if err != nil || retryAfter <= resetAfter.Seconds()+sublimitRetryMargin {
+	if retryAfter.Seconds() <= resetAfter.Seconds()+sublimitRetryMargin {
 		return 0
 	}
-	return time.Duration(retryAfter * float64(time.Second))
+	return retryAfter
+}
+
+// refusalWait is how long a 429 asks to wait: the longer of Retry-After and
+// the body's retry_after.
+//
+// On a shared 429, Discord writes Retry-After: 1 whatever the wait, and only
+// the body has it: every shared refusal bucketmap captured, 154 of them, did
+// so, 899 s for a prune, 59.7 s for a webhook creation. Reading the header
+// alone, the hold above never fired against Discord, and the proxy came back
+// a second later into the same refusal. The body stays readable for the
+// checks that follow.
+func refusalWait(resp *http.Response) time.Duration {
+	var wait float64
+	if v, err := strconv.ParseFloat(resp.Header.Get("Retry-After"), 64); err == nil {
+		wait = v
+	}
+	if resp.Body != nil {
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSublimitPeek))
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		var body struct {
+			RetryAfter float64 `json:"retry_after"`
+		}
+		if err == nil && json.Unmarshal(raw, &body) == nil && body.RetryAfter > wait {
+			wait = body.RetryAfter
+		}
+	}
+	return time.Duration(wait * float64(time.Second))
 }
