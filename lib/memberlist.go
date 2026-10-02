@@ -6,10 +6,13 @@ import (
 	"time"
 )
 
-func InitMemberList(knownMembers []string, port int, proxyPort string, manager *QueueManager) *memberlist.Memberlist {
+func InitMemberList(knownMembers []string, port int, proxyPort string, advertiseAddr string, manager *QueueManager) *memberlist.Memberlist {
 	config := memberlist.DefaultLANConfig()
 	config.BindPort = port
 	config.AdvertisePort = port
+	if advertiseAddr != "" {
+		config.AdvertiseAddr = advertiseAddr
+	}
 	config.Delegate = NirnDelegate{
 		proxyPort: proxyPort,
 	}

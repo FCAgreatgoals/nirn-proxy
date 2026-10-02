@@ -67,7 +67,7 @@ func GetMetricsPath(route string) string {
 func GetOptimisticBucketPath(url string, method string) string {
 	bucket := strings.Builder{}
 	bucket.WriteByte('/')
-	cleanUrl := strings.SplitN(url, "?", 1)[0]
+	cleanUrl := strings.SplitN(url, "?", 2)[0]
 	if strings.HasPrefix(cleanUrl, "/api/v") {
 		cleanUrl = strings.ReplaceAll(cleanUrl, "/api/v", "")
 		l := len(cleanUrl)
@@ -89,13 +89,13 @@ func GetOptimisticBucketPath(url string, method string) string {
 	// ! stands for any replaceable id
 	switch parts[0] {
 	case MajorChannels:
-		if numParts == 2 {
-			// Return the same bucket for all reqs to /channels/id
-			// In this case, the discord bucket is the same regardless of the id
-			bucket.WriteString(MajorChannels)
-			bucket.WriteString("/!")
-			return bucket.String()
-		}
+		// Every channel keeps its own queue, /channels/{id} itself included.
+		// Upstream merged that route across all channels on the grounds that
+		// Discord returns the same bucket for every id. It does, but the
+		// bucket names the rule, not the counter: channel_id is a major
+		// parameter, so each channel counts separately. Merged, locking a
+		// hundred channels during a raid went through one queue, and one
+		// channel running out of budget put all the others to sleep.
 		bucket.WriteString(MajorChannels)
 		bucket.WriteByte('/')
 		bucket.WriteString(parts[1])
@@ -105,10 +105,9 @@ func GetOptimisticBucketPath(url string, method string) string {
 		bucket.WriteString("/!")
 		currMajor = MajorInvites
 	case MajorGuilds:
-		// guilds/:guildId/channels share the same bucket for all guilds
-		if numParts == 3 && parts[2] == "channels" {
-			return "/" + MajorGuilds + "/!/channels"
-		}
+		// guild_id is a major parameter, so /guilds/{id}/channels counts per
+		// guild like everything else under it. Upstream merged it across
+		// guilds for the same reason it merged /channels/{id}.
 		fallthrough
 	case MajorInteractions:
 		if numParts == 4 && parts[3] == "callback" {
@@ -130,15 +129,24 @@ func GetOptimisticBucketPath(url string, method string) string {
 
 	// At this point, the major + id part is already accounted for
 	// In this loop, we only need to strip all remaining snowflakes, emoji names and webhook tokens(optional)
-	for idx, part := range parts[2:] {
+	tail := parts[2:]
+	for idx, part := range tail {
 		if IsSnowflake(part) {
-			// Custom rule for messages older than 14d
-			if currMajor == MajorChannels && parts[idx - 1] == "messages" && method == "DELETE" {
+			// Deleting a message older than 14 days, or newer than 10 seconds,
+			// falls under its own bucket. Upstream compared parts[idx-1], an
+			// index into the whole path, while looping over its tail: it read
+			// the wrong segment and the rule never fired. It also wrote nothing
+			// for a message in between, which would have merged the delete
+			// into the queue of GET and POST on the channel's messages.
+			if currMajor == MajorChannels && method == "DELETE" && idx == len(tail)-1 && idx > 0 && tail[idx-1] == "messages" {
 				createdAt, _ := GetSnowflakeCreatedAt(part)
-				if createdAt.Before(time.Now().Add(-1 * 14 * 24 * time.Hour)) {
+				switch {
+				case createdAt.Before(time.Now().Add(-14 * 24 * time.Hour)):
 					bucket.WriteString("/!14dmsg")
-				} else if createdAt.After(time.Now().Add(-1 * 10 * time.Second)) {
+				case createdAt.After(time.Now().Add(-10 * time.Second)):
 					bucket.WriteString("/!10smsg")
+				default:
+					bucket.WriteString("/!")
 				}
 				continue
 			}

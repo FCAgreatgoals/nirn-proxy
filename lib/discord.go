@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"io"
 	"io/ioutil"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,11 +20,39 @@ import (
 
 var client *http.Client
 
+// discordURL is where requests are sent. DISCORD_URL overrides it, the name
+// WelcomerTeam's fork chose, so the proxy can sit in front of a Discord
+// simulator or a recording proxy.
+var discordURL = "https://discord.com"
+
+// SetDiscordURL changes where requests are sent. It takes a scheme and a
+// host, with no path: the request path is appended as is.
+func SetDiscordURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("DISCORD_URL must be http or https, got %q", raw)
+	}
+	if parsed.Host == "" || strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != "" {
+		return fmt.Errorf("DISCORD_URL must be a scheme and a host only, got %q", raw)
+	}
+	discordURL = parsed.Scheme + "://" + parsed.Host
+	return nil
+}
+
 var contextTimeout time.Duration
 
 var globalOverrideMap = make(map[string]uint)
 
-var disableRestLimitDetection = false
+// disableRestLimitDetection is on by default. The detection infers the global
+// limit from /gateway/bot's max_concurrency (500, or 25 per unit), a heuristic
+// Discord does not document and upstream itself called optimistic, planning to
+// make disabling it "the only possible behavior". It also spends the
+// /gateway/bot budget, measured at 2 requests per 5 seconds, which the bot's
+// own shards need when they start.
+var disableRestLimitDetection = true
 
 type BotGatewayResponse struct {
 	SessionStartLimit map[string]int `json:"session_start_limit"`
@@ -217,7 +247,7 @@ func GetBotUser(token string) (*BotUserResponse, error) {
 }
 
 func doDiscordReq(ctx context.Context, path string, method string, body io.ReadCloser, header http.Header, query string) (*http.Response, error) {
-	discordReq, err := http.NewRequestWithContext(ctx, method, "https://discord.com"+path+"?"+query, body)
+	discordReq, err := http.NewRequestWithContext(ctx, method, discordURL+path+"?"+query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +285,10 @@ func ProcessRequest(ctx context.Context, item *QueueItem) (*http.Response, error
 
 	ctx, cancel := context.WithTimeout(ctx, contextTimeout)
 	defer cancel()
-	discordResp, err := doDiscordReq(ctx, req.URL.Path, req.Method, req.Body, req.Header.Clone(), req.URL.RawQuery)
+	// The path as the client encoded it. Rebuilding the URL from the decoded
+	// path turned the "#" of a keycap emoji into a fragment, and the reaction
+	// request reached Discord truncated to ".../reactions/".
+	discordResp, err := doDiscordReq(ctx, req.URL.EscapedPath(), req.Method, req.Body, req.Header.Clone(), req.URL.RawQuery)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
