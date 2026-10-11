@@ -288,6 +288,13 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 	if forwdFor != "" {
 		logEntry = logEntry.WithField("forwardedFor", forwdFor)
 	}
+	reserve, err := parseReserve(req.Header)
+	if err != nil {
+		(*resp).Header().Set("content-type", "application/json")
+		(*resp).WriteHeader(400)
+		(*resp).Write([]byte(`{"message": "` + err.Error() + `", "code": 0}`))
+		return
+	}
 	routeTo := m.calculateRoute(pathHash)
 
 	routeToHeader := req.Header.Get("nirn-routed-to")
@@ -302,7 +309,6 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 	}
 
 	var q *RequestQueue
-	var err error
 	if queueType == Bearer {
 		q, err = m.getOrCreateBearerQueue(token)
 	} else {
@@ -334,7 +340,7 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 		globalRouteTo := m.calculateRoute(botHash)
 
 		for globalRouteTo != "" && queueType != Bearer {
-			err = m.clusterGlobalRateLimiter.FireGlobalRequest(req.Context(), globalRouteTo, botHash, botLimit)
+			err = m.clusterGlobalRateLimiter.FireGlobalRequest(req.Context(), globalRouteTo, botHash, botLimit, reserve)
 			if err == nil {
 				break
 			}
@@ -348,7 +354,7 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 			globalRouteTo = m.calculateRoute(botHash)
 		}
 		if globalRouteTo == "" || queueType == Bearer {
-			m.clusterGlobalRateLimiter.Take(botHash, botLimit)
+			m.clusterGlobalRateLimiter.Take(botHash, botLimit, reserve)
 		}
 	}
 	err = q.Queue(req, resp, path, pathHash)
@@ -417,7 +423,13 @@ func (m *QueueManager) HandleGlobal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.clusterGlobalRateLimiter.Take(botHash, uint(botLimit))
+	reserve, err := parseReserve(r.Header)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	m.clusterGlobalRateLimiter.Take(botHash, uint(botLimit), reserve)
 	logger.Trace("Returned OK for global request")
 }
 

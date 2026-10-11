@@ -19,11 +19,19 @@ type QueueItem struct {
 	Res      *http.ResponseWriter
 	doneChan chan *http.Response
 	errChan  chan error
+	// reserve is the share of capacity this request leaves to other traffic,
+	// noReserve for ordinary traffic.
+	reserve int
 }
 
 type QueueChannel struct {
-	ch       chan *QueueItem
-	lastUsed time.Time
+	ch chan *QueueItem
+	// bulk holds the requests that carry a reserve, served only when ch is
+	// empty and the bucket leaves them room; pending is the one waiting for it.
+	bulk        chan *QueueItem
+	pending     *QueueItem
+	pendingHeld bool
+	lastUsed    time.Time
 }
 
 type RequestQueue struct {
@@ -120,6 +128,7 @@ func (q *RequestQueue) destroy() {
 	logger.Debug("Destroying queue")
 	for _, val := range q.queues {
 		close(val.ch)
+		close(val.bulk)
 	}
 }
 
@@ -131,6 +140,7 @@ func (q *RequestQueue) sweep() {
 	for key, val := range q.queues {
 		if time.Since(val.lastUsed) > 10*time.Minute {
 			close(val.ch)
+			close(val.bulk)
 			delete(q.queues, key)
 			sweptEntries++
 		}
@@ -154,6 +164,10 @@ func safeSend(queue *QueueChannel, value *QueueItem) {
 		}
 	}()
 
+	if value.reserve != noReserve {
+		queue.bulk <- value
+		return
+	}
 	queue.ch <- value
 }
 
@@ -169,7 +183,9 @@ func (q *RequestQueue) Queue(req *http.Request, res *http.ResponseWriter, path s
 	doneChan := make(chan *http.Response)
 	errChan := make(chan error)
 
-	safeSend(ch, &QueueItem{req, res, doneChan, errChan})
+	// The queue manager has already refused a malformed reserve.
+	reserve, _ := parseReserve(req.Header)
+	safeSend(ch, &QueueItem{req, res, doneChan, errChan, reserve})
 
 	select {
 	case <-doneChan:
@@ -187,6 +203,7 @@ func (q *RequestQueue) getQueueChannel(path string, pathHash uint64) *QueueChann
 	if !ok {
 		ch = &QueueChannel{
 			ch:       make(chan *QueueItem, q.bufferSize),
+			bulk:     make(chan *QueueItem, q.bufferSize),
 			lastUsed: t,
 		}
 		q.queues[pathHash] = ch
@@ -293,7 +310,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 
 	// Fail fast path for webhook 404s
 	var ret404 = false
-	for item := range ch.ch {
+	state := &bucketState{}
+	defer ch.dropHeld()
+	for {
+		item, ok := ch.next(state)
+		if !ok {
+			return
+		}
 		ctx := context.WithValue(item.Req.Context(), "identifier", q.identifier)
 		if ret404 {
 			return404webhook(item)
@@ -322,7 +345,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 
 		scope := resp.Header.Get("x-ratelimit-scope")
 
-		_, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
+		limit, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
+		if err == nil && !isGlobal {
+			if resp.StatusCode == 429 {
+				remaining = 0
+			}
+			state.observe(limit, remaining, resetAfter, time.Now())
+		}
 
 		if isGlobal {
 			if lockGlobal(q.globalLockedUntil, time.Now().Add(resetAfter)) {

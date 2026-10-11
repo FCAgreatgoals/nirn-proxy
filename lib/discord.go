@@ -288,7 +288,10 @@ func ProcessRequest(ctx context.Context, item *QueueItem) (*http.Response, error
 	// The path as the client encoded it. Rebuilding the URL from the decoded
 	// path turned the "#" of a keycap emoji into a fragment, and the reaction
 	// request reached Discord truncated to ".../reactions/".
-	discordResp, err := doDiscordReq(ctx, req.URL.EscapedPath(), req.Method, req.Body, req.Header.Clone(), req.URL.RawQuery)
+	// The reserve is for this proxy alone: Discord never sees it.
+	header := req.Header.Clone()
+	header.Del(reserveHeader)
+	discordResp, err := doDiscordReq(ctx, req.URL.EscapedPath(), req.Method, req.Body, header, req.URL.RawQuery)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
