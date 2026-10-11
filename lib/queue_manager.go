@@ -42,6 +42,7 @@ type QueueManager struct {
 	localNodeName            string
 	localNodeIP              string
 	localNodeProxyListenAddr string
+	aside                    asidePeers
 }
 
 func onEvictLruItem(key interface{}, value interface{}) {
@@ -88,7 +89,7 @@ func (m *QueueManager) reindexMembers() {
 	nameToAddressMap := make(map[string]string)
 	for _, m := range members {
 		orderedMembers = append(orderedMembers, m.Name)
-		nameToAddressMap[m.Name] = m.Addr.String() + ":" + string(m.Meta)
+		nameToAddressMap[m.Name] = nodeProxyAddr(m)
 	}
 	sort.Strings(orderedMembers)
 
@@ -97,6 +98,7 @@ func (m *QueueManager) reindexMembers() {
 }
 
 func (m *QueueManager) onNodeJoin(node *memberlist.Node) {
+	m.aside.clear(nodeProxyAddr(node))
 	// Running in goroutine prevents a deadlock inside memberlist
 	go m.reindexMembers()
 }
@@ -139,7 +141,7 @@ func (m *QueueManager) calculateRoute(pathHash uint64) string {
 	m.bearerMu.RLock()
 	defer m.bearerMu.RUnlock()
 
-	members := m.orderedClusterMembers
+	members := m.aside.filter(m.orderedClusterMembers, m.nameToAddressMap, time.Now())
 
 	if len(members) == 0 {
 		return ""
@@ -295,80 +297,108 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 		RequestsRoutedRecv.Inc()
 	}
 
+	if routeTo != "" && routeToHeader == "" && m.relay(resp, req, pathHash, routeTo, logEntry) {
+		return
+	}
+
+	var q *RequestQueue
 	var err error
-	if routeTo == "" || routeToHeader != "" {
-		var q *RequestQueue
-		var err error
-		if queueType == Bearer {
-			q, err = m.getOrCreateBearerQueue(token)
-		} else {
-			q, err = m.getOrCreateBotQueue(token)
-		}
-
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "429") {
-				Generate429(resp)
-				logEntry.WithFields(logrus.Fields{"function": "getOrCreateQueue", "queueType": queueType}).Warn(err)
-			} else {
-				(*resp).WriteHeader(500)
-				(*resp).Write([]byte(err.Error()))
-				ErrorCounter.Inc()
-				logEntry.WithFields(logrus.Fields{"function": "getOrCreateQueue", "queueType": queueType}).Error(err)
-			}
-			return
-		}
-
-		// Interaction endpoints are not bound to the global rate limit, so they
-		// neither wait on it nor spend it.
-		if q.identifier != "NoAuth" && !IsInteractionEndpoint(req.URL.Path) {
-			var botHash uint64 = 0
-			if q.user != nil {
-				botHash = HashCRC64(q.user.Id)
-			}
-
-			botLimit := q.botLimit
-			globalRouteTo := m.calculateRoute(botHash)
-
-			if globalRouteTo == "" || queueType == Bearer {
-				m.clusterGlobalRateLimiter.Take(botHash, botLimit)
-			} else {
-				err = m.clusterGlobalRateLimiter.FireGlobalRequest(req.Context(), globalRouteTo, botHash, botLimit)
-				if err != nil {
-					logEntry.WithField("function", "FireGlobalRequest").Error(err)
-					ErrorCounter.Inc()
-					Generate429(resp)
-					return
-				}
-			}
-		}
-		err = q.Queue(req, resp, path, pathHash)
-		if err != nil {
-			log := logEntry.WithField("function", "Queue")
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				log.WithField("waitedFor", time.Since(reqStart)).Warn(err)
-			} else {
-				log.Error(err)
-			}
-		}
+	if queueType == Bearer {
+		q, err = m.getOrCreateBearerQueue(token)
 	} else {
-		var res *http.Response
-		res, err = m.routeRequest(routeTo, req)
+		q, err = m.getOrCreateBotQueue(token)
+	}
+
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "429") {
+			Generate429(resp)
+			logEntry.WithFields(logrus.Fields{"function": "getOrCreateQueue", "queueType": queueType}).Warn(err)
+		} else {
+			(*resp).WriteHeader(500)
+			(*resp).Write([]byte(err.Error()))
+			ErrorCounter.Inc()
+			logEntry.WithFields(logrus.Fields{"function": "getOrCreateQueue", "queueType": queueType}).Error(err)
+		}
+		return
+	}
+
+	// Interaction endpoints are not bound to the global rate limit, so they
+	// neither wait on it nor spend it.
+	if q.identifier != "NoAuth" && !IsInteractionEndpoint(req.URL.Path) {
+		var botHash uint64 = 0
+		if q.user != nil {
+			botHash = HashCRC64(q.user.Id)
+		}
+
+		botLimit := q.botLimit
+		globalRouteTo := m.calculateRoute(botHash)
+
+		for globalRouteTo != "" && queueType != Bearer {
+			err = m.clusterGlobalRateLimiter.FireGlobalRequest(req.Context(), globalRouteTo, botHash, botLimit)
+			if err == nil {
+				break
+			}
+			if !isDialError(err) {
+				logEntry.WithField("function", "FireGlobalRequest").Error(err)
+				ErrorCounter.Inc()
+				Generate429(resp)
+				return
+			}
+			m.setAside(globalRouteTo, logEntry)
+			globalRouteTo = m.calculateRoute(botHash)
+		}
+		if globalRouteTo == "" || queueType == Bearer {
+			m.clusterGlobalRateLimiter.Take(botHash, botLimit)
+		}
+	}
+	err = q.Queue(req, resp, path, pathHash)
+	if err != nil {
+		log := logEntry.WithField("function", "Queue")
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			log.WithField("waitedFor", time.Since(reqStart)).Warn(err)
+		} else {
+			log.Error(err)
+		}
+	}
+}
+
+// relay sends the request to the node that owns its bucket and copies the
+// answer back. A peer that refuses the connection is set aside and the next
+// owner tried; relay returns false once that owner is this node, for the
+// request to be served here.
+func (m *QueueManager) relay(resp *http.ResponseWriter, req *http.Request, pathHash uint64, routeTo string, logEntry *logrus.Entry) bool {
+	body := &relayBody{ReadCloser: req.Body}
+	if req.Body != nil && req.Body != http.NoBody {
+		req.Body = body
+	}
+	for routeTo != "" {
+		res, err := m.routeRequest(routeTo, req)
 		if err == nil {
 			err = CopyResponseToResponseWriter(res, resp)
 			if err != nil {
 				logEntry.WithField("function", "CopyResponseToResponseWriter").Error(err)
 			}
-		} else {
-			logEntry = logEntry.WithField("function", "routeRequest")
-			if !errors.Is(err, context.Canceled) {
-				logEntry.Error(err)
-			} else {
-				logEntry.Warn(err)
-			}
-			// if it's a context canceled on the client it won't get the 429 anyway, if it's within the cluster we should retry
-			Generate429(resp)
+			return true
 		}
+		if isDialError(err) && !body.started {
+			m.setAside(routeTo, logEntry)
+			routeTo = m.calculateRoute(pathHash)
+			continue
+		}
+		logEntry = logEntry.WithField("function", "routeRequest")
+		if !errors.Is(err, context.Canceled) {
+			logEntry.Error(err)
+		} else {
+			logEntry.Warn(err)
+		}
+		// if it's a context canceled on the client it won't get the 429 anyway, if it's within the cluster we should retry
+		Generate429(resp)
+		return true
 	}
+	if body.ReadCloser != nil && req.Body == body {
+		req.Body = body.ReadCloser
+	}
+	return false
 }
 
 func (m *QueueManager) HandleGlobal(w http.ResponseWriter, r *http.Request) {
