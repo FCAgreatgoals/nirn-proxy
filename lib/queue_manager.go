@@ -140,14 +140,12 @@ func (m *QueueManager) calculateRoute(pathHash uint64) string {
 	defer m.bearerMu.RUnlock()
 
 	members := m.orderedClusterMembers
-	count := uint64(len(members))
 
-	if count == 0 {
+	if len(members) == 0 {
 		return ""
 	}
 
-	chosenIndex := pathHash % count
-	addr := m.nameToAddressMap[members[chosenIndex]]
+	addr := m.nameToAddressMap[hrwOwner(pathHash, members)]
 	if addr == m.localNodeProxyListenAddr {
 		return ""
 	}
