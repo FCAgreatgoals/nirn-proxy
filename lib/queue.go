@@ -19,10 +19,28 @@ type QueueItem struct {
 	Res      *http.ResponseWriter
 	doneChan chan *http.Response
 	errChan  chan error
+	// reserve is the share of capacity this request leaves to other traffic,
+	// noReserve for ordinary traffic.
+	reserve int
+	// queued is when the request reached its bucket's queue, and maxWait how
+	// long its reserve may hold it from then.
+	queued  time.Time
+	maxWait time.Duration
+	// counted once the request was held at least once; unwatch stops waking
+	// the bucket's goroutine when its client gives up.
+	counted bool
+	unwatch func() bool
 }
 
 type QueueChannel struct {
-	ch       chan *QueueItem
+	ch chan *QueueItem
+	// bulk holds the requests that carry a reserve, served only when ch is
+	// empty and the bucket leaves them room; held are the ones taken from it,
+	// lowest reserve first, and wake stirs the goroutine when one's client
+	// gives up.
+	bulk     chan *QueueItem
+	held     []*QueueItem
+	wake     chan struct{}
 	lastUsed time.Time
 }
 
@@ -40,6 +58,9 @@ type RequestQueue struct {
 	isTokenInvalid *int64
 	botLimit       uint
 	queueType      QueueType
+	// takeGlobal spends one request of the bot's global limit, with the
+	// request's reserve; nil for queues the global limit does not apply to.
+	takeGlobal func(ctx context.Context, reserve int) error
 }
 
 func NewRequestQueue(processor func(ctx context.Context, item *QueueItem) (*http.Response, error), token string, bufferSize int) (*RequestQueue, error) {
@@ -120,6 +141,7 @@ func (q *RequestQueue) destroy() {
 	logger.Debug("Destroying queue")
 	for _, val := range q.queues {
 		close(val.ch)
+		close(val.bulk)
 	}
 }
 
@@ -131,6 +153,7 @@ func (q *RequestQueue) sweep() {
 	for key, val := range q.queues {
 		if time.Since(val.lastUsed) > 10*time.Minute {
 			close(val.ch)
+			close(val.bulk)
 			delete(q.queues, key)
 			sweptEntries++
 		}
@@ -154,6 +177,10 @@ func safeSend(queue *QueueChannel, value *QueueItem) {
 		}
 	}()
 
+	if value.reserve != noReserve {
+		queue.bulk <- value
+		return
+	}
 	queue.ch <- value
 }
 
@@ -169,7 +196,10 @@ func (q *RequestQueue) Queue(req *http.Request, res *http.ResponseWriter, path s
 	doneChan := make(chan *http.Response)
 	errChan := make(chan error)
 
-	safeSend(ch, &QueueItem{req, res, doneChan, errChan})
+	// The queue manager has already refused a malformed reserve or max wait.
+	reserve, _ := parseReserve(req.Header)
+	maxWait, _ := parseMaxWait(req.Header)
+	safeSend(ch, &QueueItem{Req: req, Res: res, doneChan: doneChan, errChan: errChan, reserve: reserve, queued: time.Now(), maxWait: maxWait})
 
 	select {
 	case <-doneChan:
@@ -187,6 +217,8 @@ func (q *RequestQueue) getQueueChannel(path string, pathHash uint64) *QueueChann
 	if !ok {
 		ch = &QueueChannel{
 			ch:       make(chan *QueueItem, q.bufferSize),
+			bulk:     make(chan *QueueItem, q.bufferSize),
+			wake:     make(chan struct{}, 1),
 			lastUsed: t,
 		}
 		q.queues[pathHash] = ch
@@ -274,7 +306,7 @@ func return401(item *QueueItem) {
 }
 
 func isInteraction(url string) bool {
-	parts := strings.Split(strings.SplitN(url, "?", 1)[0], "/")
+	parts := strings.Split(strings.SplitN(url, "?", 2)[0], "/")
 	for _, p := range parts {
 		if len(p) > 128 {
 			return true
@@ -293,7 +325,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 
 	// Fail fast path for webhook 404s
 	var ret404 = false
-	for item := range ch.ch {
+	state := &bucketState{}
+	defer ch.dropHeld()
+	for {
+		item, ok := ch.next(state)
+		if !ok {
+			return
+		}
 		ctx := context.WithValue(item.Req.Context(), "identifier", q.identifier)
 		if ret404 {
 			return404webhook(item)
@@ -305,6 +343,22 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			continue
 		}
 
+		// A global lock holds everything but interaction answers, which the
+		// global limit does not apply to.
+		if !IsInteractionEndpoint(item.Req.URL.Path) {
+			if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
+				item.errChan <- err
+				continue
+			}
+			if q.takeGlobal != nil {
+				if err := q.takeGlobal(ctx, item.reserve); err != nil {
+					Generate429(item.Res)
+					item.errChan <- err
+					continue
+				}
+			}
+		}
+
 		resp, err := q.processor(ctx, item)
 		if err != nil {
 			item.errChan <- err
@@ -313,12 +367,16 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 
 		scope := resp.Header.Get("x-ratelimit-scope")
 
-		_, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
+		limit, remaining, resetAfter, isGlobal, err := parseHeaders(&resp.Header, scope != "user")
+		if err == nil && !isGlobal {
+			if resp.StatusCode == 429 {
+				remaining = 0
+			}
+			state.observe(limit, remaining, resetAfter, time.Now())
+		}
 
 		if isGlobal {
-			//Lock global
-			sw := atomic.CompareAndSwapInt64(q.globalLockedUntil, 0, time.Now().Add(resetAfter).UnixNano())
-			if sw {
+			if lockGlobal(q.globalLockedUntil, time.Now().Add(resetAfter)) {
 				logger.WithFields(logrus.Fields{
 					"until":      time.Now().Add(resetAfter),
 					"resetAfter": resetAfter,
@@ -330,7 +388,10 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			item.errChan <- err
 			continue
 		}
+		learnBucket(item.Req, resp.Header)
 		item.doneChan <- resp
+
+		trackInvalidRequest(resp.StatusCode, scope, q.identifier, path)
 
 		if resp.StatusCode == 429 && scope != "shared" {
 			logger.WithFields(logrus.Fields{
@@ -349,7 +410,7 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			}).Warn("Unexpected 429")
 		}
 
-		if resp.StatusCode == 404 && strings.HasPrefix(path, "/webhooks/") && !isInteraction(item.Req.URL.String()) {
+		if resp.StatusCode == 404 && strings.HasPrefix(trimAPIPrefix(item.Req.URL.Path), "/webhooks/") && !isInteraction(item.Req.URL.String()) && isUnknownWebhook(resp) {
 			logger.WithFields(logrus.Fields{
 				"bucket": path,
 				"route":  item.Req.URL.String(),
@@ -380,8 +441,33 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 		}
 
 		if remaining == 0 || resp.StatusCode == 429 {
-			duration := time.Until(time.Now().Add(resetAfter))
-			time.Sleep(duration)
+			// Only a reset Discord announced gets the margin: an answer
+			// without rate limit headers reads as nothing left and nothing
+			// to wait.
+			wait := resetAfter
+			if wait > 0 {
+				wait += resetMargin
+			}
+			if resp.StatusCode == 429 {
+				retry := refusalWait(resp)
+				if scope == "shared" && retry > wait {
+					// The resource's own limit, which the bucket's reset
+					// says nothing of: wait what Discord asked for.
+					wait = retry
+				}
+				if hold := sublimitHold(retry, scope, resetAfter); hold >= wait && hold > 0 {
+					// Only this queue sleeps: renames have one of their
+					// own, so the channel's other edits keep flowing.
+					wait = hold
+					logger.WithFields(logrus.Fields{
+						"bucket":     path,
+						"method":     item.Req.Method,
+						"holdFor":    hold,
+						"resetAfter": resetAfter,
+					}).Warn("Sublimit hit, holding this route until it lifts")
+				}
+			}
+			time.Sleep(wait)
 		}
 		prevRem, prevReset = remaining, resetAfter
 	}

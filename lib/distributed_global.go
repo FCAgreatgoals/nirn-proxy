@@ -3,8 +3,6 @@ package lib
 import (
 	"context"
 	"errors"
-	"github.com/Clever/leakybucket"
-	"github.com/Clever/leakybucket/memory"
 	"github.com/sirupsen/logrus"
 	"net/http"
 	"strconv"
@@ -14,63 +12,66 @@ import (
 
 type ClusterGlobalRateLimiter struct {
 	sync.RWMutex
-	globalBucketsMap map[uint64]*leakybucket.Bucket
-	memStorage *memory.Storage
+	globalBucketsMap map[uint64]*globalWindow
 }
 
 func NewClusterGlobalRateLimiter() *ClusterGlobalRateLimiter {
-	memStorage := memory.New()
 	return &ClusterGlobalRateLimiter{
-		memStorage: memStorage,
-		globalBucketsMap: make(map[uint64]*leakybucket.Bucket),
+		globalBucketsMap: make(map[uint64]*globalWindow),
 	}
 }
 
-func (c *ClusterGlobalRateLimiter) Take(botHash uint64, botLimit uint) {
-	bucket := *c.getOrCreate(botHash, botLimit)
-takeGlobal:
-	_, err := bucket.Add(1)
-	if err != nil {
-		reset := bucket.Reset()
+// Take spends one request of the bot's global limit, waiting for the next
+// window while there is none to spend, or none the reserve allows.
+func (c *ClusterGlobalRateLimiter) Take(botHash uint64, botLimit uint, reserve int) {
+	bucket := c.getOrCreate(botHash, botLimit)
+	held := false
+	for {
+		ok, wait := bucket.take(reserve, time.Now())
+		if ok {
+			return
+		}
+		if reserve != noReserve && !held {
+			held = true
+			ReserveHeld.WithLabelValues("global").Inc()
+		}
 		logger.WithFields(logrus.Fields{
-			"waitTime": time.Until(reset),
+			"waitTime": wait,
 		}).Trace("Failed to grab global token, sleeping for a bit")
-		time.Sleep(time.Until(reset))
-		goto takeGlobal
+		time.Sleep(wait)
 	}
 }
 
-func (c *ClusterGlobalRateLimiter) getOrCreate(botHash uint64, botLimit uint) *leakybucket.Bucket {
+func (c *ClusterGlobalRateLimiter) getOrCreate(botHash uint64, botLimit uint) *globalWindow {
 	c.RLock()
 	b, ok := c.globalBucketsMap[botHash]
 	c.RUnlock()
-	if !ok {
-		c.Lock()
-		// Check if it wasn't created while we didnt hold the exclusive lock
-		b, ok = c.globalBucketsMap[botHash]
-		if ok {
-			c.Unlock()
-			return b
-		}
-
-		globalBucket, _ := c.memStorage.Create(strconv.FormatUint(botHash, 10), botLimit, 1 * time.Second)
-		c.globalBucketsMap[botHash] = &globalBucket
-		c.Unlock()
-		return &globalBucket
-	} else {
+	if ok {
 		return b
 	}
+	c.Lock()
+	defer c.Unlock()
+	// Check if it wasn't created while we didnt hold the exclusive lock
+	if b, ok = c.globalBucketsMap[botHash]; ok {
+		return b
+	}
+	b = newGlobalWindow(botLimit, time.Second+globalWindowMargin)
+	c.globalBucketsMap[botHash] = b
+	return b
 }
 
-
-func (c *ClusterGlobalRateLimiter) FireGlobalRequest(ctx context.Context, addr string, botHash uint64, botLimit uint) error {
-	globalReq, err := http.NewRequestWithContext(ctx, "GET", "http://" + addr + "/nirn/global", nil)
+func (c *ClusterGlobalRateLimiter) FireGlobalRequest(ctx context.Context, addr string, botHash uint64, botLimit uint, reserve int) error {
+	globalReq, err := http.NewRequestWithContext(ctx, "GET", "http://"+addr+"/nirn/global", nil)
 	if err != nil {
 		return err
 	}
 
 	globalReq.Header.Set("bot-hash", strconv.FormatUint(botHash, 10))
 	globalReq.Header.Set("bot-limit", strconv.FormatUint(uint64(botLimit), 10))
+	if reserve != noReserve {
+		// The node that owns the bot's global limit applies the reserve.
+		globalReq.Header.Set(reserveHeader, strconv.Itoa(reserve))
+	}
 
 	// The node handling the request will only return if we grabbed a token or an error was thrown
 	resp, err := client.Do(globalReq)

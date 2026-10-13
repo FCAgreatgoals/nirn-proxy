@@ -62,7 +62,11 @@ func initCluster(proxyPort string, manager *lib.QueueManager) *memberlist.Member
 		}
 	}
 
-	return lib.InitMemberList(members, port, proxyPort, manager)
+	advertiseAddr, err := lib.ResolveAdvertiseAddr(os.Getenv("CLUSTER_ADVERTISE_ADDR"))
+	if err != nil {
+		logger.WithFields(logrus.Fields{"function": "ResolveAdvertiseAddr"}).Fatal(err)
+	}
+	return lib.InitMemberList(members, port, proxyPort, advertiseAddr, manager)
 }
 
 func main() {
@@ -74,7 +78,13 @@ func main() {
 
 	globalOverrides := lib.EnvGet("BOT_RATELIMIT_OVERRIDES", "")
 
-	disableGlobalRatelimitDetection := lib.EnvGetBool("DISABLE_GLOBAL_RATELIMIT_DETECTION", false)
+	// Off unless asked for: Discord documents 50 requests per second unless
+	// support raises it, which BOT_RATELIMIT_OVERRIDES expresses exactly.
+	disableGlobalRatelimitDetection := lib.EnvGetBool("DISABLE_GLOBAL_RATELIMIT_DETECTION", true)
+
+	if err := lib.SetDiscordURL(lib.EnvGet("DISCORD_URL", "https://discord.com")); err != nil {
+		logger.WithFields(logrus.Fields{"function": "SetDiscordURL"}).Fatal(err)
+	}
 
 	lib.ConfigureDiscordHTTPClient(outboundIp, time.Duration(timeout)*time.Millisecond, disableHttp2, globalOverrides, disableGlobalRatelimitDetection)
 
@@ -86,6 +96,8 @@ func main() {
 	bufferSize = lib.EnvGetInt("BUFFER_SIZE", 50)
 	maxBearerLruSize := lib.EnvGetInt("MAX_BEARER_COUNT", 1024)
 
+	lib.SetMaxReserveHold(time.Duration(lib.EnvGetInt("MAX_RESERVE_HOLD", 21600)) * time.Second)
+
 	manager := lib.NewQueueManager(bufferSize, maxBearerLruSize)
 
 	mux := manager.CreateMux()
@@ -95,8 +107,10 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       10 * time.Second,
-		WriteTimeout:      1 * time.Hour,
-		MaxHeaderBytes:    1 << 20,
+		// A request held back by its reserve is answered once its bucket
+		// leaves room, up to MAX_RESERVE_HOLD later.
+		WriteTimeout:   max(time.Hour, lib.MaxReserveHold()+time.Minute),
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {

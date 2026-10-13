@@ -47,6 +47,7 @@ Configuration options are
 | DISABLE_HTTP_2  | bool                                        | true    |
 | BOT_RATELIMIT_OVERRIDES | string list (comma separated)       | ""      |
 | DISABLE_GLOBAL_RATELIMIT_DETECTION | boolean                  | false   |
+| MAX_RESERVE_HOLD | number (seconds)                           | 21600   |
 
 Information on each config var can be found [here](https://github.com/germanoeich/nirn-proxy/blob/main/CONFIG.md)
 
@@ -60,6 +61,14 @@ When using the proxy, it is safe to remove the ratelimiting logic from clients a
 
 The proxy also guards against known scenarios that might cause a cloudflare ban, like too many webhook 404s or too many 401s.
 
+### Background work: `X-RateLimit-Reserve`
+
+A request carrying `X-RateLimit-Reserve: N`, N from 1 to 100, leaves N percent of the capacity to the bot's other traffic: it goes out only while more than that share remains, both on the bot's global limit and on its route's bucket, and waits otherwise. Mark mass bans or role syncs with it, and the bot's own commands keep flowing during them. Requests without the header behave as before; the header can hold a request back, never move it ahead, and it never reaches Discord. A value outside 0 to 100 is refused with a 400.
+
+Requests held on one bucket go lowest reserve first, the oldest first for equal ones: a request that leaves less to others is the more urgent. Requests without the header always go before held ones.
+
+A held request keeps its connection open until it goes, or until its client gives up. `X-RateLimit-Reserve-Max-Wait: S` caps the hold at S seconds (decimals allowed), and `MAX_RESERVE_HOLD` caps every hold. If its bucket is known to be whole again only past that cap, the proxy answers at once with a 429 marked `generated-by-proxy`, whose `Retry-After` and `retry_after` say when to come back. Neither header reaches Discord, and a malformed value is refused with a 400.
+
 ### Proxy specific responses
 
 The proxy may return a 408 Request Timeout if Discord takes more than $REQUEST_TIMEOUT milliseconds to respond. This allows you to identify and react to routes that have issues.
@@ -71,6 +80,17 @@ Requests may also return a 408 status code in the event that they were aborted b
 The ratelimiting only works with `X-RateLimit-Precision` set to `seconds`. If you are using Discord API v8+, that is the only possible behaviour. For users on v6 or v7, please refer to your library docs for information on which precision it uses and how to change it to seconds.
 
 The proxy tries its best to detect your REST global limits, but Discord does not expose this information. Be sure to set `BOT_RATELIMIT_OVERRIDES` for any clients with elevated limits.
+
+### Checking the proxy against Discord
+
+[bucketmap](https://github.com/FCAgreatgoals/bucketmap) walks a test guild through every Discord REST route a bot can reach, a few requests each, and reports what each answered and which bucket it fell in. Run it once against Discord and once through the proxy, then compare: the proxy conforms when every step answers the same and nothing through it hits a 429.
+
+```sh
+go install github.com/FCAgreatgoals/bucketmap/cmd/bucketmap@latest
+bucketmap run -guild GUILD_ID -users USER1,USER2,USER3,USER4 -report direct.json
+bucketmap run -api http://localhost:8080/api/v10 -guild GUILD_ID -users USER1,USER2,USER3,USER4 -report proxied.json
+bucketmap compare direct.json proxied.json
+```
 
 ### High availability
 
@@ -114,6 +134,8 @@ This will vary depending on your usage, how many unique routes you see, etc. For
 |nirn_proxy_requests_routed_sent     | none                                   | Counter for requests routed to other nodes                 |
 |nirn_proxy_requests_routed_received | none                                   | Counter for requests received from other nodes             |
 |nirn_proxy_requests_routed_error    | none                                   | Counter for requests routed that failed                    |
+|nirn_proxy_invalid_requests         | status                                 | Counter for responses Discord counts as invalid (401, 403, and 429 not scoped shared) |
+|nirn_proxy_invalid_requests_window  | none                                   | Gauge for invalid requests over the last ten minutes, against Discord's limit of 10,000 per IP |
 
 Note: 429s can produce two status: 429 Too Many Requests or 429 Shared. The latter is only produced for requests that return with the x-ratelimit-scope header set to "shared", which means they don't count towards the cloudflare firewall limit and thus should not be used for alerts, etc.
 
@@ -126,6 +148,8 @@ The proxy can be profiled at runtime by enabling the ENABLE_PPROF flag and brows
 ### Related projects
 
 [nirn-probe](https://github.com/germanoeich/nirn-probe) - Checks and alerts if a server is cloudflare banned
+
+[bucketmap](https://github.com/FCAgreatgoals/bucketmap) - Index of every Discord REST route and its rate limit, with a conformance engine to check the proxy against Discord
 
 ##### Acknowledgements
 - [Eris](https://github.com/abalabahaha/eris) - used as reference throughout this project

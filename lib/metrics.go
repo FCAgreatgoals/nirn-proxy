@@ -34,6 +34,16 @@ var (
 		Help:		"Counter for requests received from other nodes",
 	})
 
+	ReserveHeld = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "nirn_proxy_reserve_held",
+		Help: "Requests held back by their X-RateLimit-Reserve, on the global limit or on their bucket",
+	}, []string{"lane"})
+
+	ReserveRefused = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "nirn_proxy_reserve_refused",
+		Help: "Requests answered with a 429 because their X-RateLimit-Reserve would hold them past MAX_RESERVE_HOLD",
+	})
+
 	RequestsRoutedError = promauto.NewCounter(prometheus.CounterOpts{
 		Name:		"nirn_proxy_requests_routed_error",
 		Help:		"Counter for failed requests routed from this node",
