@@ -22,6 +22,8 @@ type QueueItem struct {
 	// reserve is the share of capacity this request leaves to other traffic,
 	// noReserve for ordinary traffic.
 	reserve int
+	// queued is when the request reached its bucket's queue.
+	queued time.Time
 }
 
 type QueueChannel struct {
@@ -188,7 +190,7 @@ func (q *RequestQueue) Queue(req *http.Request, res *http.ResponseWriter, path s
 
 	// The queue manager has already refused a malformed reserve.
 	reserve, _ := parseReserve(req.Header)
-	safeSend(ch, &QueueItem{req, res, doneChan, errChan, reserve})
+	safeSend(ch, &QueueItem{req, res, doneChan, errChan, reserve, time.Now()})
 
 	select {
 	case <-doneChan:

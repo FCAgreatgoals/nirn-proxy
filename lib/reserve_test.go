@@ -2,6 +2,8 @@ package lib
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -271,3 +273,68 @@ func TestGlobalWindowReserveWait(t *testing.T) {
 	}
 }
 
+// A request whose bucket is whole again only past the hold limit is answered
+// at once, with a 429 saying when to come back, and never reaches Discord.
+func TestReserveHeldPastTheLimitIsRefusedAtOnce(t *testing.T) {
+	defer SetMaxReserveHold(MaxReserveHold())
+	SetMaxReserveHold(5 * time.Second)
+
+	remaining := 1
+	fake := &fakeDiscord{answer: bucketOfFive(&remaining, "30")}
+	q := newTestQueue(fake)
+	q.send(t, "GET", reserveRoute, "") // 1 left of 5, whole again in 30 s
+
+	req := httptest.NewRequest("GET", reserveRoute, nil)
+	req.Header.Set(reserveHeader, "30")
+	routingHash, bucket, _ := (&QueueManager{}).GetRequestRoutingInfo(req, "Bot test")
+	rec := httptest.NewRecorder()
+	var res http.ResponseWriter = rec
+	start := time.Now()
+	if err := q.Queue(req, &res, bucket, routingHash); err == nil {
+		t.Fatal("no error for a refused request")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("refused after %v", d)
+	}
+	if rec.Code != 429 || rec.Header().Get("generated-by-proxy") != "true" {
+		t.Errorf("status %d, generated-by-proxy %q", rec.Code, rec.Header().Get("generated-by-proxy"))
+	}
+	if got := rec.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After %q, want 30", got)
+	}
+	if fake.count() != 1 {
+		t.Errorf("%d requests reached Discord", fake.count())
+	}
+
+	// Within the limit, the same wait holds the request instead.
+	SetMaxReserveHold(time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	res = httptest.NewRecorder()
+	held := httptest.NewRequest("GET", reserveRoute, nil).WithContext(ctx)
+	held.Header.Set(reserveHeader, "30")
+	if err := q.Queue(held, &res, bucket, routingHash); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("within the limit: %v, want the request held until its client gave up", err)
+	}
+}
+
+// The proxy's own 429 asks for the wait it means, in each of the places a
+// client may read it.
+func TestProxy429CarriesItsWait(t *testing.T) {
+	rec := httptest.NewRecorder()
+	var res http.ResponseWriter = rec
+	writeProxy429(&res, 2500*time.Millisecond, "held")
+	if got := rec.Header().Get("X-RateLimit-Reset-After"); got != "2.500" {
+		t.Errorf("Reset-After %q", got)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "3" {
+		t.Errorf("Retry-After %q, want it rounded up to 3", got)
+	}
+	var body struct {
+		RetryAfter float64 `json:"retry_after"`
+		Global     bool    `json:"global"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.RetryAfter != 2.5 || body.Global {
+		t.Errorf("body %s (%v)", rec.Body.String(), err)
+	}
+}

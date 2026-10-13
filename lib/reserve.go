@@ -2,6 +2,7 @@ package lib
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -24,6 +25,22 @@ const reserveHeader = "X-RateLimit-Reserve"
 const noReserve = -1
 
 var errBadReserve = errors.New(reserveHeader + " must be an integer from 0 to 100")
+
+// maxReserveHold is the longest a request may be held back. One that would
+// wait longer is answered at once with a 429 saying when its bucket is whole
+// again, for the client to retry then, rather than holding its connection
+// open for hours. MAX_RESERVE_HOLD sets it.
+var maxReserveHold = 6 * time.Hour
+
+// SetMaxReserveHold changes how long a request may be held back.
+func SetMaxReserveHold(d time.Duration) {
+	maxReserveHold = d
+}
+
+// MaxReserveHold is how long a request may be held back.
+func MaxReserveHold() time.Duration {
+	return maxReserveHold
+}
 
 // parseReserve reads the reserve a request asks for. Zero is ordinary traffic.
 func parseReserve(h http.Header) (int, error) {
@@ -112,11 +129,17 @@ func (ch *QueueChannel) next(state *bucketState) (*QueueItem, bool) {
 			}
 		}
 
-		wait := state.reserveWait(ch.pending.reserve, time.Now())
+		now := time.Now()
+		wait := state.reserveWait(ch.pending.reserve, now)
 		if wait <= 0 {
 			item := ch.pending
 			ch.pending = nil
 			return item, true
+		}
+		if now.Add(wait).Sub(ch.pending.queued) > maxReserveHold {
+			refuseHeld(ch.pending, wait)
+			ch.pending = nil
+			continue
 		}
 		if !ch.pendingHeld {
 			ch.pendingHeld = true
@@ -191,6 +214,14 @@ func (g *globalWindow) take(reserve int, now time.Time) (bool, time.Duration) {
 	}
 	leave := g.n - int(keep)
 	return false, g.at(leave - 1).Add(g.window).Sub(now)
+}
+
+// refuseHeld answers a request that would be held past maxReserveHold with
+// a 429 telling its client when the bucket is whole again.
+func refuseHeld(item *QueueItem, wait time.Duration) {
+	ReserveRefused.Inc()
+	writeProxy429(item.Res, wait, "Held by "+reserveHeader+" for longer than the proxy allows.")
+	item.errChan <- fmt.Errorf("held by its reserve for %v, past the %v allowed, sending 429 for client to retry", wait.Round(time.Second), maxReserveHold)
 }
 
 // dropHeld answers the requests still held back once the queue is closed, so

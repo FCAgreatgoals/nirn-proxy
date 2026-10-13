@@ -96,6 +96,8 @@ func main() {
 	bufferSize = lib.EnvGetInt("BUFFER_SIZE", 50)
 	maxBearerLruSize := lib.EnvGetInt("MAX_BEARER_COUNT", 1024)
 
+	lib.SetMaxReserveHold(time.Duration(lib.EnvGetInt("MAX_RESERVE_HOLD", 21600)) * time.Second)
+
 	manager := lib.NewQueueManager(bufferSize, maxBearerLruSize)
 
 	mux := manager.CreateMux()
@@ -105,8 +107,10 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       10 * time.Second,
-		WriteTimeout:      1 * time.Hour,
-		MaxHeaderBytes:    1 << 20,
+		// A request held back by its reserve is answered once its bucket
+		// leaves room, up to MAX_RESERVE_HOLD later.
+		WriteTimeout:   max(time.Hour, lib.MaxReserveHold()+time.Minute),
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {

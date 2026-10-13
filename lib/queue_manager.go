@@ -2,10 +2,12 @@ package lib
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/hashicorp/memberlist"
 	"github.com/sirupsen/logrus"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -169,7 +171,7 @@ func (m *QueueManager) routeRequest(addr string, req *http.Request) (*http.Respo
 		"path":   req.URL.Path,
 		"method": req.Method,
 	}).Trace("Routing request to node in cluster")
-	resp, err := client.Do(nodeReq)
+	resp, err := peerClient.Do(nodeReq)
 	logger.WithFields(logrus.Fields{
 		"to":     addr,
 		"path":   req.URL.Path,
@@ -185,19 +187,29 @@ func (m *QueueManager) routeRequest(addr string, req *http.Request) (*http.Respo
 }
 
 func Generate429(resp *http.ResponseWriter) {
+	writeProxy429(resp, time.Second, "You are being rate limited.")
+}
+
+// writeProxy429 answers with a 429 of the proxy's own, shaped like Discord's,
+// that asks the client to wait wait.
+func writeProxy429(resp *http.ResponseWriter, wait time.Duration, message string) {
 	writer := *resp
+	seconds := wait.Seconds()
 	writer.Header().Set("generated-by-proxy", "true")
 	writer.Header().Set("x-ratelimit-scope", "user")
 	writer.Header().Set("x-ratelimit-limit", "1")
 	writer.Header().Set("x-ratelimit-remaining", "0")
-	writer.Header().Set("x-ratelimit-reset", strconv.FormatInt(time.Now().Add(1*time.Second).Unix(), 10))
+	writer.Header().Set("x-ratelimit-reset", strconv.FormatFloat(float64(time.Now().Add(wait).UnixMilli())/1000, 'f', 3, 64))
 	// Upstream wrote "x-ratelimit-after", a header Discord never sends, so a
 	// client pacing itself on X-RateLimit-Reset-After found nothing here.
-	writer.Header().Set("x-ratelimit-reset-after", "1")
-	writer.Header().Set("retry-after", "1")
+	writer.Header().Set("x-ratelimit-reset-after", strconv.FormatFloat(seconds, 'f', 3, 64))
+	// Retry-After is in whole seconds, rounded up so that it never asks for
+	// less than the body does.
+	writer.Header().Set("retry-after", strconv.FormatInt(int64(math.Ceil(seconds)), 10))
 	writer.Header().Set("content-type", "application/json")
 	writer.WriteHeader(429)
-	writer.Write([]byte("{\n\t\"global\": false,\n\t\"message\": \"You are being rate limited.\",\n\t\"retry_after\": 1\n}"))
+	body, _ := json.Marshal(map[string]any{"global": false, "message": message, "retry_after": math.Round(seconds*1000) / 1000})
+	writer.Write(body)
 }
 
 // bindGlobal gives a queue the way to spend its bot's global limit, which it

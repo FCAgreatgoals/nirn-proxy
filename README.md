@@ -47,6 +47,7 @@ Configuration options are
 | DISABLE_HTTP_2  | bool                                        | true    |
 | BOT_RATELIMIT_OVERRIDES | string list (comma separated)       | ""      |
 | DISABLE_GLOBAL_RATELIMIT_DETECTION | boolean                  | false   |
+| MAX_RESERVE_HOLD | number (seconds)                           | 21600   |
 
 Information on each config var can be found [here](https://github.com/germanoeich/nirn-proxy/blob/main/CONFIG.md)
 
@@ -59,6 +60,12 @@ The proxy listens on all routes and relays them to Discord, while keeping track 
 When using the proxy, it is safe to remove the ratelimiting logic from clients and fire requests instantly, however, the proxy does not handle retries. If for some reason (i.e shared ratelimits, internal discord ratelimits, etc) the proxy encounters a 429, it will return that to the client. It is safe to immediately retry requests that return 429 or even setup retry logic elsewhere (like in a load balancer or service mesh).
 
 The proxy also guards against known scenarios that might cause a cloudflare ban, like too many webhook 404s or too many 401s.
+
+### Background work: `X-RateLimit-Reserve`
+
+A request carrying `X-RateLimit-Reserve: N`, N from 1 to 100, leaves N percent of the capacity to the bot's other traffic: it goes out only while more than that share remains, both on the bot's global limit and on its route's bucket, and waits otherwise. Mark mass bans or role syncs with it, and the bot's own commands keep flowing during them. Requests without the header behave as before; the header can hold a request back, never move it ahead, and it never reaches Discord. A value outside 0 to 100 is refused with a 400.
+
+A held request keeps its connection open until it goes. If its bucket is whole again only past `MAX_RESERVE_HOLD`, the proxy answers at once with a 429 marked `generated-by-proxy`, whose `Retry-After` and `retry_after` say when to come back.
 
 ### Proxy specific responses
 

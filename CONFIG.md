@@ -63,6 +63,11 @@ Bearer token queues max size. Internally, bearer queues are put in an LRU map, t
 Requests are never interrupted midway, even when an entry is evicted. A low LRU size may cause increased 429s if a bearer token has too many requests queued and fires another one after eviction.
 Default: 1024
 
+##### MAX_RESERVE_HOLD
+The longest, in seconds, a request carrying `X-RateLimit-Reserve` may be held back. One whose bucket is whole again only later is answered at once with a 429 saying when to retry, instead of keeping its connection open. The proxy's write timeout grows with it.
+
+Default: 21600 (6 hours)
+
 ##### DISABLE_HTTP_2
 Flag to disable HTTP/2 requests on the client that makes discord requests. Does not impact the http server.
 This flag defaults to true due to go http2 support having a few minor issues that can cause requests to fail.

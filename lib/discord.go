@@ -44,6 +44,8 @@ func SetDiscordURL(raw string) error {
 
 var contextTimeout time.Duration
 
+var peerClient = http.DefaultClient
+
 var globalOverrideMap = make(map[string]uint)
 
 // disableRestLimitDetection is on by default. The detection infers the global
@@ -147,6 +149,9 @@ func ConfigureDiscordHTTPClient(ip string, timeout time.Duration, disableHttp2 b
 		Transport: transport,
 		Timeout:   90 * time.Second,
 	}
+	// A request relayed to its bucket's node may be held there by its
+	// reserve for hours: the client's own request bounds it, not a timeout.
+	peerClient = &http.Client{Transport: transport}
 
 	contextTimeout = timeout
 
