@@ -296,6 +296,7 @@ func ProcessRequest(ctx context.Context, item *QueueItem) (*http.Response, error
 	// The reserve is for this proxy alone: Discord never sees it.
 	header := req.Header.Clone()
 	header.Del(reserveHeader)
+	header.Del(maxWaitHeader)
 	discordResp, err := doDiscordReq(ctx, req.URL.EscapedPath(), req.Method, req.Body, header, req.URL.RawQuery)
 
 	if err != nil {

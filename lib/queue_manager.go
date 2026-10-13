@@ -353,7 +353,11 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 	}
 	// Refused here, before the request is relayed or queued; the queue reads
 	// it again when the request goes out.
-	if _, err := parseReserve(req.Header); err != nil {
+	_, err := parseReserve(req.Header)
+	if err == nil {
+		_, err = parseMaxWait(req.Header)
+	}
+	if err != nil {
 		(*resp).Header().Set("content-type", "application/json")
 		(*resp).WriteHeader(400)
 		(*resp).Write([]byte(`{"message": "` + err.Error() + `", "code": 0}`))
@@ -373,7 +377,6 @@ func (m *QueueManager) fulfillRequest(resp *http.ResponseWriter, req *http.Reque
 	}
 
 	var q *RequestQueue
-	var err error
 	if queueType == Bearer {
 		q, err = m.getOrCreateBearerQueue(token)
 	} else {

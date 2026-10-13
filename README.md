@@ -65,7 +65,9 @@ The proxy also guards against known scenarios that might cause a cloudflare ban,
 
 A request carrying `X-RateLimit-Reserve: N`, N from 1 to 100, leaves N percent of the capacity to the bot's other traffic: it goes out only while more than that share remains, both on the bot's global limit and on its route's bucket, and waits otherwise. Mark mass bans or role syncs with it, and the bot's own commands keep flowing during them. Requests without the header behave as before; the header can hold a request back, never move it ahead, and it never reaches Discord. A value outside 0 to 100 is refused with a 400.
 
-A held request keeps its connection open until it goes. If its bucket is whole again only past `MAX_RESERVE_HOLD`, the proxy answers at once with a 429 marked `generated-by-proxy`, whose `Retry-After` and `retry_after` say when to come back.
+Requests held on one bucket go lowest reserve first, the oldest first for equal ones: a request that leaves less to others is the more urgent. Requests without the header always go before held ones.
+
+A held request keeps its connection open until it goes, or until its client gives up. `X-RateLimit-Reserve-Max-Wait: S` caps the hold at S seconds (decimals allowed), and `MAX_RESERVE_HOLD` caps every hold. If its bucket is known to be whole again only past that cap, the proxy answers at once with a 429 marked `generated-by-proxy`, whose `Retry-After` and `retry_after` say when to come back. Neither header reaches Discord, and a malformed value is refused with a 400.
 
 ### Proxy specific responses
 

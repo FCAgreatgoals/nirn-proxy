@@ -64,7 +64,7 @@ Requests are never interrupted midway, even when an entry is evicted. A low LRU 
 Default: 1024
 
 ##### MAX_RESERVE_HOLD
-The longest, in seconds, a request carrying `X-RateLimit-Reserve` may be held back. One whose bucket is whole again only later is answered at once with a 429 saying when to retry, instead of keeping its connection open. The proxy's write timeout grows with it.
+The longest, in seconds, a request carrying `X-RateLimit-Reserve` may be held back. One whose bucket is whole again only later is answered at once with a 429 saying when to retry, instead of keeping its connection open. A request can ask for less with `X-RateLimit-Reserve-Max-Wait`, never for more. The proxy's write timeout grows with it.
 
 Default: 21600 (6 hours)
 

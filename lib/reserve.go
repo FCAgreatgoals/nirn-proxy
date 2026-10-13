@@ -1,10 +1,12 @@
 package lib
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,10 +23,17 @@ import (
 
 const reserveHeader = "X-RateLimit-Reserve"
 
+// maxWaitHeader caps, in seconds, how long a request may be held by its
+// reserve, below MAX_RESERVE_HOLD: a client that gives up on a request after
+// a minute asks for its 429 before then, rather than finding nothing.
+const maxWaitHeader = "X-RateLimit-Reserve-Max-Wait"
+
 // noReserve marks ordinary traffic.
 const noReserve = -1
 
 var errBadReserve = errors.New(reserveHeader + " must be an integer from 0 to 100")
+
+var errBadMaxWait = errors.New(maxWaitHeader + " must be a number of seconds above 0")
 
 // maxReserveHold is the longest a request may be held back. One that would
 // wait longer is answered at once with a 429 saying when its bucket is whole
@@ -56,6 +65,20 @@ func parseReserve(h http.Header) (int, error) {
 		return noReserve, nil
 	}
 	return n, nil
+}
+
+// parseMaxWait reads how long a request may be held by its reserve: what it
+// asks for, never more than MAX_RESERVE_HOLD.
+func parseMaxWait(h http.Header) (time.Duration, error) {
+	raw := strings.TrimSpace(h.Get(maxWaitHeader))
+	if raw == "" {
+		return maxReserveHold, nil
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !(seconds > 0) || math.IsInf(seconds, 0) {
+		return 0, errBadMaxWait
+	}
+	return min(time.Duration(seconds*float64(time.Second)), maxReserveHold), nil
 }
 
 // reserved is how many of capacity a reserve keeps back, never less than one:
@@ -106,9 +129,13 @@ func (s *bucketState) reserveWait(reserve int, now time.Time) time.Duration {
 }
 
 // next hands the bucket's goroutine its next request: ordinary traffic first,
-// then held back requests once the bucket leaves them room. A held request
-// waits aside, so the ordinary ones behind it are never stuck in its wake.
-// It returns false once the queue is closed.
+// then held back requests once the bucket leaves them room. Held requests wait
+// aside, so the ordinary ones behind them are never stuck in their wake, and
+// the lowest reserve goes first among them, the oldest first for equal ones:
+// a request that leaves less to others is the more urgent. Every held request
+// is watched, not only the first: each is answered its 429 as soon as its
+// bucket is known to stay short past its max wait, and leaves when its client
+// gives up. It returns false once the queue is closed.
 func (ch *QueueChannel) next(state *bucketState) (*QueueItem, bool) {
 	for {
 		select {
@@ -116,46 +143,107 @@ func (ch *QueueChannel) next(state *bucketState) (*QueueItem, bool) {
 			return item, ok
 		default:
 		}
+		ch.collect()
 
-		if ch.pending == nil {
+		now := time.Now()
+		ch.settle(state, now)
+		if len(ch.held) == 0 {
 			select {
 			case item, ok := <-ch.ch:
 				return item, ok
 			case item, ok := <-ch.bulk:
-				if !ok {
-					return nil, false
-				}
-				ch.pending, ch.pendingHeld = item, false
+				ch.hold(item, ok)
 			}
-		}
-
-		now := time.Now()
-		wait := state.reserveWait(ch.pending.reserve, now)
-		if wait <= 0 {
-			item := ch.pending
-			ch.pending = nil
-			return item, true
-		}
-		if now.Add(wait).Sub(ch.pending.queued) > maxReserveHold {
-			refuseHeld(ch.pending, wait)
-			ch.pending = nil
 			continue
 		}
-		if !ch.pendingHeld {
-			ch.pendingHeld = true
-			ReserveHeld.WithLabelValues("bucket").Inc()
+
+		// Whether a request may go only grows as its reserve shrinks: if
+		// the lowest one cannot go, none can.
+		first := ch.held[0]
+		wait := state.reserveWait(first.reserve, now)
+		if wait <= 0 {
+			ch.release(0)
+			return first, true
+		}
+		for _, item := range ch.held {
+			if !item.counted {
+				item.counted = true
+				ReserveHeld.WithLabelValues("bucket").Inc()
+			}
 		}
 		timer := time.NewTimer(wait)
 		select {
 		case item, ok := <-ch.ch:
 			timer.Stop()
 			return item, ok
-		case <-timer.C:
-		case <-ch.pending.Req.Context().Done():
+		case item, ok := <-ch.bulk:
 			timer.Stop()
-			ch.pending.errChan <- ch.pending.Req.Context().Err()
-			ch.pending = nil
+			ch.hold(item, ok)
+		case <-ch.wake:
+			timer.Stop()
+		case <-timer.C:
 		}
+	}
+}
+
+// collect moves the requests waiting in the bulk lane among the held ones.
+func (ch *QueueChannel) collect() {
+	for {
+		select {
+		case item, ok := <-ch.bulk:
+			if !ch.hold(item, ok) {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// hold takes a request from the bulk lane, and says whether there was one.
+// The held requests stay sorted by reserve, then by arrival.
+func (ch *QueueChannel) hold(item *QueueItem, ok bool) bool {
+	if !ok {
+		// Closed with the queue: nothing more will come.
+		ch.bulk = nil
+		return false
+	}
+	wake := ch.wake
+	item.unwatch = context.AfterFunc(item.Req.Context(), func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	i := sort.Search(len(ch.held), func(i int) bool { return ch.held[i].reserve > item.reserve })
+	ch.held = append(ch.held, nil)
+	copy(ch.held[i+1:], ch.held[i:])
+	ch.held[i] = item
+	return true
+}
+
+// release takes the i-th held request out.
+func (ch *QueueChannel) release(i int) *QueueItem {
+	item := ch.held[i]
+	item.unwatch()
+	ch.held = append(ch.held[:i], ch.held[i+1:]...)
+	return item
+}
+
+// settle answers the held requests that must not wait any longer: those whose
+// client gave up, and those whose bucket stays short past their max wait.
+func (ch *QueueChannel) settle(state *bucketState, now time.Time) {
+	for i := 0; i < len(ch.held); {
+		item := ch.held[i]
+		if err := item.Req.Context().Err(); err != nil {
+			ch.release(i).errChan <- err
+			continue
+		}
+		if wait := state.reserveWait(item.reserve, now); wait > 0 && now.Add(wait).Sub(item.queued) > item.maxWait {
+			refuseHeld(ch.release(i), wait)
+			continue
+		}
+		i++
 	}
 }
 
@@ -220,8 +308,8 @@ func (g *globalWindow) take(reserve int, now time.Time) (bool, time.Duration) {
 // a 429 telling its client when the bucket is whole again.
 func refuseHeld(item *QueueItem, wait time.Duration) {
 	ReserveRefused.Inc()
-	writeProxy429(item.Res, wait, "Held by "+reserveHeader+" for longer than the proxy allows.")
-	item.errChan <- fmt.Errorf("held by its reserve for %v, past the %v allowed, sending 429 for client to retry", wait.Round(time.Second), maxReserveHold)
+	writeProxy429(item.Res, wait, "Held by "+reserveHeader+" for longer than its max wait.")
+	item.errChan <- fmt.Errorf("would be held by its reserve %v more, past its %v max wait, sending 429 for client to retry", wait.Round(time.Millisecond), item.maxWait)
 }
 
 // dropHeld answers the requests still held back once the queue is closed, so
@@ -231,11 +319,12 @@ func (ch *QueueChannel) dropHeld() {
 		Generate429(item.Res)
 		item.errChan <- errors.New("queue closed while the request was held by its reserve, sending 429 for client to retry")
 	}
-	if ch.pending != nil {
-		drop(ch.pending)
-		ch.pending = nil
+	for len(ch.held) > 0 {
+		drop(ch.release(0))
 	}
-	for item := range ch.bulk {
-		drop(item)
+	if ch.bulk != nil {
+		for item := range ch.bulk {
+			drop(item)
+		}
 	}
 }

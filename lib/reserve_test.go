@@ -205,12 +205,13 @@ func TestReserveHeaderNeverReachesDiscord(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/v10/users/@me", nil)
 	req.Header.Set(reserveHeader, "30")
+	req.Header.Set(maxWaitHeader, "60")
 	var res http.ResponseWriter = httptest.NewRecorder()
 	if _, err := ProcessRequest(context.Background(), &QueueItem{Req: req, Res: &res}); err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Get(reserveHeader) != "" {
-		t.Errorf("Discord received %q", got.Get(reserveHeader))
+	if got == nil || got.Get(reserveHeader) != "" || got.Get(maxWaitHeader) != "" {
+		t.Errorf("Discord received %q and %q", got.Get(reserveHeader), got.Get(maxWaitHeader))
 	}
 }
 
@@ -224,6 +225,16 @@ func TestMalformedReserveIsRefused(t *testing.T) {
 	m.DiscordRequestHandler(rec, req)
 	if rec.Code != 400 {
 		t.Errorf("status %d, want 400", rec.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/api/v10/users/@me", nil)
+	req.Header.Set("Authorization", "Bot test")
+	req.Header.Set(reserveHeader, "30")
+	req.Header.Set(maxWaitHeader, "soon")
+	rec = httptest.NewRecorder()
+	m.DiscordRequestHandler(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("max wait: status %d, want 400", rec.Code)
 	}
 }
 
@@ -336,5 +347,133 @@ func TestProxy429CarriesItsWait(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.RetryAfter != 2.5 || body.Global {
 		t.Errorf("body %s (%v)", rec.Body.String(), err)
+	}
+}
+
+func TestParseMaxWait(t *testing.T) {
+	defer SetMaxReserveHold(MaxReserveHold())
+	SetMaxReserveHold(time.Hour)
+	for raw, want := range map[string]time.Duration{"": time.Hour, "60": time.Minute, " 0.5 ": 500 * time.Millisecond, "86400": time.Hour} {
+		h := http.Header{}
+		h.Set(maxWaitHeader, raw)
+		if got, err := parseMaxWait(h); err != nil || got != want {
+			t.Errorf("%q = %v, %v; want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "-1", "abc", "NaN", "Inf", "60s"} {
+		h := http.Header{}
+		h.Set(maxWaitHeader, raw)
+		if _, err := parseMaxWait(h); err == nil {
+			t.Errorf("%q accepted", raw)
+		}
+	}
+}
+
+// queueHeld queues a request with a reserve and a max wait in the
+// background; the returned channel gives what Queue returned, and the
+// recorder what the client received.
+func (q *RequestQueue) queueHeld(ctx context.Context, path, reserve, maxWait string) (chan error, *httptest.ResponseRecorder) {
+	req := httptest.NewRequest("GET", path, nil).WithContext(ctx)
+	req.Header.Set(reserveHeader, reserve)
+	if maxWait != "" {
+		req.Header.Set(maxWaitHeader, maxWait)
+	}
+	routingHash, bucket, _ := (&QueueManager{}).GetRequestRoutingInfo(req, "Bot test")
+	rec := httptest.NewRecorder()
+	var res http.ResponseWriter = rec
+	done := make(chan error, 1)
+	go func() { done <- q.Queue(req, &res, bucket, routingHash) }()
+	return done, rec
+}
+
+// Among held requests the lowest reserve goes first, whatever the order they
+// came in: a ban held at 30 does not wait behind a mass unban held at 70.
+func TestLowestReserveGoesFirst(t *testing.T) {
+	remaining := 1
+	fake := &fakeDiscord{answer: bucketOfFive(&remaining, "0.300")}
+	q := newTestQueue(fake)
+	q.send(t, "GET", reserveRoute, "") // 1 left of 5: neither may go
+
+	const unban, ban = reserveRoute + "1", reserveRoute + "2"
+	ctx := context.Background()
+	unbanDone, _ := q.queueHeld(ctx, unban, "70", "")
+	time.Sleep(50 * time.Millisecond)
+	banDone, _ := q.queueHeld(ctx, ban, "30", "")
+	<-banDone
+	<-unbanDone
+
+	if fake.count() != 3 || fake.call(1).path != ban || fake.call(2).path != unban {
+		t.Errorf("order reaching Discord: %v", fake.calls)
+	}
+}
+
+// Every held request is watched for its max wait, not only the first: one
+// queued behind a held request is answered at once when its bucket stays
+// short past its max wait.
+func TestMaxWaitWatchesEveryHeldRequest(t *testing.T) {
+	remaining := 1
+	fake := &fakeDiscord{answer: bucketOfFive(&remaining, "30")}
+	q := newTestQueue(fake)
+	q.send(t, "GET", reserveRoute, "") // 1 left of 5, whole again in 30 s
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstDone, _ := q.queueHeld(ctx, reserveRoute, "30", "")
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	shortDone, rec := q.queueHeld(context.Background(), reserveRoute, "70", "5")
+	select {
+	case <-shortDone:
+	case <-time.After(time.Second):
+		t.Fatal("the request with a 5 s max wait is still held")
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("answered after %v", d)
+	}
+	if rec.Code != 429 || rec.Header().Get("Retry-After") != "30" {
+		t.Errorf("status %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	select {
+	case err := <-firstDone:
+		t.Fatalf("the request without a max wait left: %v", err)
+	default:
+	}
+	cancel()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Errorf("first request: %v", err)
+	}
+	if fake.count() != 1 {
+		t.Errorf("%d requests reached Discord", fake.count())
+	}
+}
+
+// A client that gives up on a request held behind others is answered at
+// once, the others staying held.
+func TestHeldRequestBehindAnotherLeavesWhenItsClientGivesUp(t *testing.T) {
+	remaining := 1
+	fake := &fakeDiscord{answer: bucketOfFive(&remaining, "30")}
+	q := newTestQueue(fake)
+	q.send(t, "GET", reserveRoute, "")
+
+	keep, cancelKeep := context.WithCancel(context.Background())
+	defer cancelKeep()
+	keptDone, _ := q.queueHeld(keep, reserveRoute, "30", "")
+	time.Sleep(50 * time.Millisecond)
+	leave, cancelLeave := context.WithCancel(context.Background())
+	leftDone, _ := q.queueHeld(leave, reserveRoute, "70", "")
+	time.Sleep(50 * time.Millisecond)
+	cancelLeave()
+	select {
+	case err := <-leftDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("left with %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("still held after its client gave up")
+	}
+	select {
+	case err := <-keptDone:
+		t.Errorf("the other request left too: %v", err)
+	default:
 	}
 }

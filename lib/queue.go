@@ -22,18 +22,26 @@ type QueueItem struct {
 	// reserve is the share of capacity this request leaves to other traffic,
 	// noReserve for ordinary traffic.
 	reserve int
-	// queued is when the request reached its bucket's queue.
-	queued time.Time
+	// queued is when the request reached its bucket's queue, and maxWait how
+	// long its reserve may hold it from then.
+	queued  time.Time
+	maxWait time.Duration
+	// counted once the request was held at least once; unwatch stops waking
+	// the bucket's goroutine when its client gives up.
+	counted bool
+	unwatch func() bool
 }
 
 type QueueChannel struct {
 	ch chan *QueueItem
 	// bulk holds the requests that carry a reserve, served only when ch is
-	// empty and the bucket leaves them room; pending is the one waiting for it.
-	bulk        chan *QueueItem
-	pending     *QueueItem
-	pendingHeld bool
-	lastUsed    time.Time
+	// empty and the bucket leaves them room; held are the ones taken from it,
+	// lowest reserve first, and wake stirs the goroutine when one's client
+	// gives up.
+	bulk     chan *QueueItem
+	held     []*QueueItem
+	wake     chan struct{}
+	lastUsed time.Time
 }
 
 type RequestQueue struct {
@@ -188,9 +196,10 @@ func (q *RequestQueue) Queue(req *http.Request, res *http.ResponseWriter, path s
 	doneChan := make(chan *http.Response)
 	errChan := make(chan error)
 
-	// The queue manager has already refused a malformed reserve.
+	// The queue manager has already refused a malformed reserve or max wait.
 	reserve, _ := parseReserve(req.Header)
-	safeSend(ch, &QueueItem{req, res, doneChan, errChan, reserve, time.Now()})
+	maxWait, _ := parseMaxWait(req.Header)
+	safeSend(ch, &QueueItem{Req: req, Res: res, doneChan: doneChan, errChan: errChan, reserve: reserve, queued: time.Now(), maxWait: maxWait})
 
 	select {
 	case <-doneChan:
@@ -209,6 +218,7 @@ func (q *RequestQueue) getQueueChannel(path string, pathHash uint64) *QueueChann
 		ch = &QueueChannel{
 			ch:       make(chan *QueueItem, q.bufferSize),
 			bulk:     make(chan *QueueItem, q.bufferSize),
+			wake:     make(chan struct{}, 1),
 			lastUsed: t,
 		}
 		q.queues[pathHash] = ch
