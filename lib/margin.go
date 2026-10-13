@@ -13,3 +13,9 @@ import "time"
 // does, walks into that 429. discordgo and arikawa add a quarter second for
 // the same reason; the measured lag asks for a little more.
 const resetMargin = 400 * time.Millisecond
+
+// globalWindowMargin lengthens the window the global limit is counted over.
+// Two requests that leave a second apart do not always arrive a second apart:
+// one that took longer to reach Discord lands inside the window of the one
+// after it. A twentieth of a second costs under 5 % of the limit.
+const globalWindowMargin = 50 * time.Millisecond

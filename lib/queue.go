@@ -48,6 +48,9 @@ type RequestQueue struct {
 	isTokenInvalid *int64
 	botLimit       uint
 	queueType      QueueType
+	// takeGlobal spends one request of the bot's global limit, with the
+	// request's reserve; nil for queues the global limit does not apply to.
+	takeGlobal func(ctx context.Context, reserve int) error
 }
 
 func NewRequestQueue(processor func(ctx context.Context, item *QueueItem) (*http.Response, error), token string, bufferSize int) (*RequestQueue, error) {
@@ -334,6 +337,13 @@ func (q *RequestQueue) subscribe(ch *QueueChannel, path string, pathHash uint64)
 			if err := waitGlobal(ctx, q.globalLockedUntil); err != nil {
 				item.errChan <- err
 				continue
+			}
+			if q.takeGlobal != nil {
+				if err := q.takeGlobal(ctx, item.reserve); err != nil {
+					Generate429(item.Res)
+					item.errChan <- err
+					continue
+				}
 			}
 		}
 

@@ -67,6 +67,7 @@ func TestGlobalLimitSparesInteractions(t *testing.T) {
 	q.botLimit = 1 // one request per second, so a second ordinary one must wait
 
 	m := NewQueueManager(16, 16)
+	m.bindGlobal(q)
 	m.queues["Bot x"] = q
 
 	serve := func(method, path string) time.Duration {

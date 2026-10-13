@@ -55,7 +55,7 @@ func (c *ClusterGlobalRateLimiter) getOrCreate(botHash uint64, botLimit uint) *g
 	if b, ok = c.globalBucketsMap[botHash]; ok {
 		return b
 	}
-	b = newGlobalWindow(botLimit, 1*time.Second)
+	b = newGlobalWindow(botLimit, time.Second+globalWindowMargin)
 	c.globalBucketsMap[botHash] = b
 	return b
 }

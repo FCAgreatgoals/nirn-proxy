@@ -136,19 +136,33 @@ func (ch *QueueChannel) next(state *bucketState) (*QueueItem, bool) {
 	}
 }
 
-// globalWindow is a bot's global limit: capacity requests per window, the
-// whole of it back at each new window. It replaces leakybucket for the global
-// limit, whose Add cannot refuse a request on what would remain after it.
+// globalWindow is a bot's global limit: at most capacity requests in any
+// window. Discord counts a window from a request's arrival, so a window the
+// proxy opened on its own clock lets the end of one and the start of the next
+// reach Discord inside a single second. The window slides instead: a request
+// goes only if fewer than capacity went out in the window before it, whenever
+// Discord's own window began. It replaces leakybucket for the global limit,
+// whose Add cannot refuse a request on what would remain after it.
 type globalWindow struct {
-	mu        sync.Mutex
-	capacity  int64
-	remaining int64
-	reset     time.Time
-	window    time.Duration
+	mu       sync.Mutex
+	capacity int64
+	window   time.Duration
+	// sent is a ring of the times the last requests went out, oldest at head.
+	sent []time.Time
+	head int
+	n    int
 }
 
 func newGlobalWindow(capacity uint, window time.Duration) *globalWindow {
-	return &globalWindow{capacity: int64(capacity), remaining: int64(capacity), reset: time.Now().Add(window), window: window}
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &globalWindow{capacity: int64(capacity), window: window, sent: make([]time.Time, capacity)}
+}
+
+// at is the i-th oldest request still in the window.
+func (g *globalWindow) at(i int) time.Time {
+	return g.sent[(g.head+i)%len(g.sent)]
 }
 
 // take spends one request of the window if the reserve allows it, and
@@ -156,15 +170,27 @@ func newGlobalWindow(capacity uint, window time.Duration) *globalWindow {
 func (g *globalWindow) take(reserve int, now time.Time) (bool, time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if now.After(g.reset) {
-		g.reset = now.Add(g.window)
-		g.remaining = g.capacity
+	for g.n > 0 && !g.at(0).After(now.Add(-g.window)) {
+		g.head = (g.head + 1) % len(g.sent)
+		g.n--
 	}
-	if g.remaining > 0 && admits(g.capacity, g.remaining, reserve) {
-		g.remaining--
+	if remaining := g.capacity - int64(g.n); remaining > 0 && admits(g.capacity, remaining, reserve) {
+		g.sent[(g.head+g.n)%len(g.sent)] = now
+		g.n++
 		return true, 0
 	}
-	return false, g.reset.Sub(now)
+	// Wait for enough of the oldest to leave the window: down to one free
+	// for ordinary traffic, to the reserve's share and one for held back
+	// requests, or to an empty window when the share leaves nothing.
+	keep := g.capacity - 1
+	if reserve != noReserve {
+		keep -= reserved(g.capacity, reserve)
+	}
+	if keep < 0 {
+		keep = 0
+	}
+	leave := g.n - int(keep)
+	return false, g.at(leave - 1).Add(g.window).Sub(now)
 }
 
 // dropHeld answers the requests still held back once the queue is closed, so

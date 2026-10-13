@@ -224,3 +224,50 @@ func TestMalformedReserveIsRefused(t *testing.T) {
 		t.Errorf("status %d, want 400", rec.Code)
 	}
 }
+
+// No window of Discord's, wherever it begins, sees more than the limit: a
+// request leaves the proxy's window one second after it went, not when a
+// window of the proxy's own clock closes.
+func TestGlobalWindowSlides(t *testing.T) {
+	g := newGlobalWindow(5, time.Second)
+	t0 := time.Now()
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	if ok, _ := g.take(noReserve, at(0)); !ok {
+		t.Fatal("first request refused")
+	}
+	for i := 0; i < 4; i++ {
+		if ok, _ := g.take(noReserve, at(900)); !ok {
+			t.Fatalf("request %d at 900 ms refused", i+2)
+		}
+	}
+	// The first has left the window, the four at 900 ms have not.
+	if ok, _ := g.take(noReserve, at(1050)); !ok {
+		t.Fatal("refused once the first had left the window")
+	}
+	ok, wait := g.take(noReserve, at(1100))
+	if ok {
+		t.Fatal("six requests within one second")
+	}
+	if want := 800 * time.Millisecond; wait != want {
+		t.Errorf("wait %v, want %v", wait, want)
+	}
+	if ok, _ := g.take(noReserve, at(1900)); !ok {
+		t.Error("refused once the 900 ms requests had left the window")
+	}
+}
+
+// A held back request waits for the reserve's share to come back, not merely
+// for one request to leave.
+func TestGlobalWindowReserveWait(t *testing.T) {
+	g := newGlobalWindow(10, time.Second)
+	t0 := time.Now()
+	for i := 0; i < 10; i++ {
+		g.take(noReserve, t0.Add(time.Duration(i)*100*time.Millisecond))
+	}
+	// Reserve 30 keeps three: four must leave, the fourth went at 300 ms.
+	ok, wait := g.take(30, t0.Add(950*time.Millisecond))
+	if ok || wait != 350*time.Millisecond {
+		t.Errorf("ok %v, wait %v; want a 350 ms wait", ok, wait)
+	}
+}
+
